@@ -1,0 +1,780 @@
+﻿# 差旅智能运营 Copilot 实施计划
+
+> **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
+
+**目标：** 构建一个面向企业差旅场景的全新 AI 智能运营平台，第一阶段先交付带引用的政策问答能力，随后逐步扩展到混合检索、Agent 工作流、规则约束与工程化部署能力。
+
+**架构：** 初期采用模块化单体架构：一个 FastAPI API 服务、一个异步 Worker 进程、一个 React 管理端，并共享 PostgreSQL + Milvus + Redis + MinIO。RAG 主链路由 LlamaIndex 驱动，Agent 工作流由 LangGraph 编排。核心原则是先把文档入库与检索问答做成稳定闭环，再在稳定数据层之上叠加工具调用 Agent 和规则引擎。
+
+**技术栈：** FastAPI、Pydantic、SQLAlchemy、PostgreSQL、Milvus、PyMilvus、LlamaIndex、LangGraph、Redis、Celery、MinIO、LiteLLM 或其他兼容 OpenAI 的模型网关、React + Vite + Ant Design、TanStack Query、Docker Compose、Kubernetes、OpenTelemetry、Prometheus/Grafana
+
+---
+
+## 前提假设
+
+- 这是一个从 0 到 1 的新项目，既要适合面试演示，也要保持真实企业内部平台的组织方式。
+- 第一条业务主线聚焦内部运营人员使用的差旅政策问答。
+- 订单异常处理、工单分流、审核辅助、邮件场景都放在 RAG 基线稳定之后。
+- 第一版目标规模约为 50 到 100 个并发内部用户，而不是公网大流量系统。
+- 系统从第一天起就要支持租户和客户隔离，因此所有业务核心表都应保留 `tenant_id` 和 `customer_id`。
+
+## 需求摘要
+
+### 功能需求
+
+- 上传并管理差旅制度、客户合同、FAQ、SOP 和帮助中心等文档。
+- 将 DOCX、PDF、XLSX、HTML 和邮件类内容解析为标准化知识记录。
+- 按块切分内容，并保留租户、客户、文档类型、生效时间、版本号、访问控制等元数据。
+- 生成向量并保存知识分块，支持查看文档处理状态。
+- 回答政策问题时必须返回引用、命中文本片段和置信度分数。
+- 持久化会话记录、Prompt 模板、检索链路、Agent 运行过程和人工反馈。
+- 在 Agent 能力之前先补齐混合检索、Rerank 和离线评测。
+- 增加 Query Router、订单异常分析、工单分流和确定性规则校验。
+- 对低置信度或高风险结果提供人工审核队列。
+
+### 非功能需求
+
+- 政策问答接口在热启动状态下 p95 延迟小于 8 秒。
+- 单次含一个工具调用的 Agent 工作流 p95 延迟小于 15 秒。
+- 50 页文档的异步入库处理 SLA 控制在 2 分钟内。
+- 内部平台可用性目标为 99.9%。
+- 可观测性要求：每次请求都必须记录结构化日志、链路追踪、模型用量和检索证据。
+- 安全要求：管理端必须鉴权、支持基于角色的权限控制、租户隔离、传输加密、日志脱敏。
+- 可靠性要求：低置信度答案不能直接给出最终决策，前端必须能展示兜底或升级处理路径。
+
+## 架构概览
+
+```text
+                +------------------------------+
+                |  React Admin / Internal UI   |
+                +--------------+---------------+
+                               |
+                               v
+                    +----------+-----------+
+                    | FastAPI API Gateway  |
+                    | auth, routing, logs  |
+                    +----+--------+--------+
+                         |        |
+            +------------+        +----------------------+
+            |                                            |
+            v                                            v
+ +----------+-----------+                    +-----------+------------+
+ | RAG Flow (LlamaIndex)|                    | Agent Flow (LangGraph) |
+ | upload, retrieve, QA |                    | state, tool, handoff   |
+ +----+---------+-------+                    +------+----------+------+
+      |         |                                   |          |
+      v         v                                   v          v
+ +----+--+  +---+-------------+  +----------------+     +----------+--+  +----+----------+
+ | MinIO |  | PostgreSQL      |  | Milvus         |     | Rule Engine |  | Tool Adapters  |
+ | files |  | metadata/logs   |  | vectors/search |     | policy/SLA  |  | order/ticket   |
+ +-------+  +---+-------------+  +----------------+     +-------------+  +---------------+
+               |
+               v
+         +-----+------+
+         | Redis      |
+         | cache/queue|
+         +-----+------+
+               |
+               v
+         +-----+------+
+         | Celery     |
+         | ingestion  |
+         | eval jobs  |
+         +------------+
+```
+
+## 关键决策与取舍
+
+| 决策 | 原因 | 代价 / 取舍 |
+| --- | --- | --- |
+| 先做模块化单体 | 最快形成可运行 MVP，调试成本最低，也更适合单人推进 | 横向拆分和独立扩缩容能力不如微服务 |
+| 向量库使用 Milvus，PostgreSQL 只保留业务数据与日志 | 更符合企业级 RAG 的角色分层，向量检索可独立扩展，后续更容易演进到大规模检索 | 本地开发和部署链路比 pgvector 更复杂 |
+| RAG 主链路使用 LlamaIndex | 更适合文档接入、节点切分、索引构建、Query Engine 和引用式问答 | 需要理解框架抽象，并控制好自定义扩展边界 |
+| Agent 编排使用 LangGraph，而不是直接依赖 LangChain 高层 Agent | 更适合有状态、多节点、可回溯、可人工介入的工作流 | 编排代码更显式，初期样板会更多 |
+| 使用 Celery 做异步入库与评测 | 文档解析和向量生成不应阻塞 API 请求线程 | 增加 Worker 和队列的运维复杂度 |
+| 先做 RAG 再做 Agent | 如果检索基线不稳定，后续所有 Agent 看起来都会不可信 | Agent 相关里程碑会顺延 |
+| 规则引擎对阈值和策略边界拥有最终裁决权 | 防止 LLM 在确定性业务规则上产生幻觉 | 需要单独维护规则配置与测试体系 |
+| 模型接入层采用 OpenAI 兼容抽象 | 保留模型路由与供应商切换能力，更符合企业网关思路 | 需要额外维护一层适配封装 |
+
+## 建议的仓库结构
+
+```text
+backend/
+  pyproject.toml
+  alembic.ini
+  app/
+    main.py
+    core/
+      config.py
+      logging.py
+      security.py
+    api/
+      deps.py
+      routes/
+        health.py
+        knowledge.py
+        chat.py
+        prompt_templates.py
+        agents.py
+        rules.py
+        reviews.py
+        evals.py
+    db/
+      base.py
+      session.py
+      models/
+        knowledge.py
+        conversation.py
+        prompt_template.py
+        agent.py
+        rule.py
+        eval.py
+    schemas/
+      knowledge.py
+      chat.py
+      agent.py
+      rule.py
+      eval.py
+    services/
+      llm/
+        client.py
+      ingestion/
+        loader.py
+        parser.py
+        chunker.py
+        pipeline.py
+      rag/
+        settings.py
+        index_builder.py
+        vector_store.py
+        query_engine.py
+        retrievers.py
+        rerankers.py
+        citation_service.py
+      prompts/
+        service.py
+      agents/
+        state.py
+        router.py
+        graph.py
+        nodes.py
+        policy_graph.py
+        anomaly_graph.py
+        ticket_router_graph.py
+        tools.py
+      rules/
+        engine.py
+      eval/
+        dataset_loader.py
+        runner.py
+    workers/
+      celery_app.py
+      tasks.py
+  tests/
+    api/
+    ingestion/
+    rag/
+    agents/
+    rules/
+    eval/
+
+frontend/
+  package.json
+  vite.config.ts
+  src/
+    main.tsx
+    app/
+      App.tsx
+      router.tsx
+      providers.tsx
+    api/
+      client.ts
+      knowledge.ts
+      chat.ts
+      prompts.ts
+      agents.ts
+      reviews.ts
+      evals.ts
+    pages/
+      DashboardPage.tsx
+      KnowledgePage.tsx
+      ChatPage.tsx
+      PromptTemplatesPage.tsx
+      EvalPage.tsx
+      AgentRunsPage.tsx
+      ReviewQueuePage.tsx
+    components/
+      DocumentUploader.tsx
+      CitationPanel.tsx
+      RetrievalTraceDrawer.tsx
+      ConfidenceBadge.tsx
+      RuleResultPanel.tsx
+      RunTimeline.tsx
+    tests/
+
+infra/
+  docker/
+    backend.Dockerfile
+    frontend.Dockerfile
+  k8s/
+    api-deployment.yaml
+    worker-deployment.yaml
+    web-deployment.yaml
+    postgres-statefulset.yaml
+    redis-deployment.yaml
+    minio-deployment.yaml
+    etcd-deployment.yaml
+    milvus-deployment.yaml
+    ingress.yaml
+  monitoring/
+    prometheus.yaml
+    grafana-dashboards.json
+
+docs/
+  plans/
+  adrs/
+```
+
+## 数据模型范围
+
+- `knowledge_document`：源文件元数据、版本、租户、客户、ACL、解析状态。
+- `knowledge_chunk`：分块文本、向量引用、可检索文本、章节路径、所属文档。
+- `chat_session` 和 `chat_message`：会话状态与问答历史。
+- `rag_recall_log`：召回候选、打分、Rerank 结果、最终上下文和耗时。
+- `prompt_template`：Prompt 模板版本及启用状态。
+- `agent_run`：Agent 名称、输入、状态流转、最终输出和置信度。
+- `tool_call_log`：工具名、参数、脱敏结果、耗时和状态。
+- `policy_rule`：确定性策略阈值与规则表达式。
+- `ticket_case` 和 `ticket_route_result`：后续阶段工单分流输入输出。
+- `audit_result`：发票或报销审核结果及规则命中情况。
+- `feedback_label`：人工纠正与反馈标签，用于后续优化。
+- `eval_dataset` 和 `eval_run`：离线评测题集和评测结果指标。
+
+## 里程碑顺序
+
+1. 初始化仓库、搭建本地运行环境、补齐鉴权占位和健康检查。
+2. 交付文档上传、解析、切块、向量化和索引入库。
+3. 交付带引用和置信度的政策问答及会话日志。
+4. 增加 Prompt 管理、检索链路追踪和基础可观测性。
+5. 增加混合检索、Rerank 和离线评测。
+6. 增加 Query Router 和一到两个工具型 Agent。
+7. 增加规则引擎和人工审核队列。
+8. 完成容器化、Kubernetes 清单、监控告警和发布控制。
+
+## 实施任务
+
+### 任务 1：搭建项目脚手架与本地运行环境
+
+**Files:**
+- Create: `backend/pyproject.toml`
+- Create: `backend/app/main.py`
+- Create: `backend/app/core/config.py`
+- Create: `backend/app/core/logging.py`
+- Create: `backend/app/api/routes/health.py`
+- Create: `backend/tests/api/test_health.py`
+- Create: `frontend/package.json`
+- Create: `frontend/vite.config.ts`
+- Create: `frontend/src/main.tsx`
+- Create: `frontend/src/app/App.tsx`
+- Create: `frontend/tests/app/App.test.tsx`
+- Create: `docker-compose.yml`
+- Create: `.env.example`
+- Create: `Makefile`
+
+**步骤 1：先写失败的后端与前端冒烟测试**
+
+```python
+from fastapi.testclient import TestClient
+from app.main import app
+
+client = TestClient(app)
+
+def test_healthcheck_returns_ok() -> None:
+    response = client.get("/health")
+    assert response.status_code == 200
+    assert response.json()["status"] == "ok"
+```
+
+```tsx
+import { render, screen } from "@testing-library/react";
+import App from "../../src/app/App";
+
+test("renders app shell title", () => {
+  render(<App />);
+  expect(screen.getByText("Travel Ops Copilot")).toBeInTheDocument();
+});
+```
+
+**步骤 2：运行测试，确认先失败**
+
+Run: `cd backend && uv run pytest tests/api/test_health.py -v`
+Expected: FAIL because `app.main` and `/health` do not exist.
+
+Run: `cd frontend && pnpm test App.test.tsx`
+Expected: FAIL because `App.tsx` does not exist.
+
+**步骤 3：写最小实现**
+
+- 建立带 `/health` 的 FastAPI 应用工厂。
+- 增加结构化日志和基于环境变量的配置读取。
+- 创建一个只有基础导航占位的 React 壳页面。
+- 在 Docker Compose 中加入 PostgreSQL、Redis、MinIO、Etcd 和 Milvus 服务。
+
+**步骤 4：运行验证**
+
+Run: `docker compose up -d postgres redis minio etcd milvus`
+Expected: all five dependencies become healthy.
+
+Run: `cd backend && uv run pytest tests/api/test_health.py -v`
+Expected: PASS.
+
+Run: `cd frontend && pnpm test App.test.tsx`
+Expected: PASS.
+
+**步骤 5：提交**
+
+```bash
+git add .env.example Makefile docker-compose.yml backend frontend
+git commit -m "chore: scaffold travel ops copilot"
+```
+
+### 任务 2：构建知识库入库链路
+
+**Files:**
+- Create: `backend/app/api/routes/knowledge.py`
+- Create: `backend/app/db/models/knowledge.py`
+- Create: `backend/app/schemas/knowledge.py`
+- Create: `backend/app/services/ingestion/loader.py`
+- Create: `backend/app/services/ingestion/parser.py`
+- Create: `backend/app/services/ingestion/chunker.py`
+- Create: `backend/app/services/ingestion/pipeline.py`
+- Create: `backend/app/services/rag/settings.py`
+- Create: `backend/app/services/rag/index_builder.py`
+- Create: `backend/app/services/rag/vector_store.py`
+- Create: `backend/app/workers/celery_app.py`
+- Create: `backend/app/workers/tasks.py`
+- Create: `backend/tests/ingestion/test_pipeline.py`
+- Create: `backend/tests/api/test_knowledge_upload.py`
+- Create: `frontend/src/api/knowledge.ts`
+- Create: `frontend/src/components/DocumentUploader.tsx`
+- Create: `frontend/src/pages/KnowledgePage.tsx`
+
+**步骤 1：先写失败测试**
+
+```python
+def test_docx_ingestion_persists_document_and_chunks(session, docx_file):
+    job_id = start_ingestion(session=session, file=docx_file, tenant_id="t1", customer_id="c1")
+    result = wait_for_job(job_id)
+    assert result.status == "completed"
+    assert result.chunk_count > 0
+```
+
+```python
+def test_upload_endpoint_returns_job_id(client, docx_file):
+    response = client.post("/api/knowledge/upload", files={"file": ("policy.docx", docx_file)})
+    assert response.status_code == 202
+    assert "job_id" in response.json()
+```
+
+**步骤 2：运行测试，确认先失败**
+
+Run: `cd backend && uv run pytest tests/ingestion/test_pipeline.py tests/api/test_knowledge_upload.py -v`
+Expected: FAIL because ingestion services and API do not exist.
+
+**步骤 3：写最小实现**
+
+- 将原始文件上传到 MinIO，并落一条 `knowledge_document` 记录。
+- 第一阶段先支持 DOCX 和 PDF 解析，XLSX 与 HTML 等格式后置。
+- 按标题层级切块，保留重叠窗口和元数据透传。
+- 通过 Celery 异步生成 embeddings，用 LlamaIndex 组织 node 构建并写入 Milvus。
+- 在 PostgreSQL 中保存 chunk、文档元数据与向量主键映射。
+- API 返回上传状态和入库任务历史。
+- 管理端新增一个基础上传页和任务状态表格。
+
+**步骤 4：运行验证**
+
+Run: `cd backend && uv run pytest tests/ingestion/test_pipeline.py tests/api/test_knowledge_upload.py -v`
+Expected: PASS.
+
+Run: `cd backend && uv run pytest -k knowledge -v`
+Expected: PASS for all ingestion-related tests.
+
+**步骤 5：提交**
+
+```bash
+git add backend/app/api/routes/knowledge.py backend/app/services/ingestion backend/app/services/rag backend/app/workers backend/tests frontend/src/api/knowledge.ts frontend/src/components/DocumentUploader.tsx frontend/src/pages/KnowledgePage.tsx
+git commit -m "feat: add knowledge ingestion pipeline"
+```
+### 任务 3：交付带引用的政策问答与会话日志
+
+**Files:**
+- Create: `backend/app/api/routes/chat.py`
+- Create: `backend/app/db/models/conversation.py`
+- Create: `backend/app/schemas/chat.py`
+- Create: `backend/app/services/llm/client.py`
+- Create: `backend/app/services/rag/query_engine.py`
+- Create: `backend/app/services/rag/citation_service.py`
+- Create: `backend/tests/rag/test_policy_qa.py`
+- Create: `frontend/src/api/chat.ts`
+- Create: `frontend/src/components/CitationPanel.tsx`
+- Create: `frontend/src/components/ConfidenceBadge.tsx`
+- Create: `frontend/src/pages/ChatPage.tsx`
+- Create: `frontend/tests/chat/ChatPage.test.tsx`
+
+**步骤 1：先写失败测试**
+
+```python
+def test_policy_answer_includes_citations_and_confidence(client, seeded_policy_chunks):
+    response = client.post("/api/chat/ask", json={"question": "Can I book business class?"})
+    payload = response.json()
+    assert response.status_code == 200
+    assert payload["answer"]
+    assert payload["citations"]
+    assert payload["confidence"] >= 0
+```
+
+**步骤 2：运行测试，确认先失败**
+
+Run: `cd backend && uv run pytest tests/rag/test_policy_qa.py -v`
+Expected: FAIL because LlamaIndex query engine and citation generation are missing.
+
+**步骤 3：写最小实现**
+
+- 通过 LlamaIndex Query Engine + Milvus 实现检索问答。
+- 回表 PostgreSQL 获取元数据与引用片段。
+- 要求每个答案必须返回 chunk id、document id 和命中文本片段。
+- 持久化会话和消息历史。
+- 在 React 问答页展示引用依据和置信度。
+- 对无命中或低置信度问题提供兜底回复。
+
+**步骤 4：运行验证**
+
+Run: `cd backend && uv run pytest tests/rag/test_policy_qa.py -v`
+Expected: PASS.
+
+Run: `cd frontend && pnpm test ChatPage.test.tsx`
+Expected: PASS.
+
+**步骤 5：提交**
+
+```bash
+git add backend/app/api/routes/chat.py backend/app/db/models/conversation.py backend/app/services/llm/client.py backend/app/services/rag backend/tests/rag frontend/src/api/chat.ts frontend/src/components/CitationPanel.tsx frontend/src/components/ConfidenceBadge.tsx frontend/src/pages/ChatPage.tsx frontend/tests/chat/ChatPage.test.tsx
+git commit -m "feat: add policy q-and-a with citations"
+```
+### 任务 4：增加 Prompt 管理、检索 Trace 与可观测性
+
+**Files:**
+- Create: `backend/app/api/routes/prompt_templates.py`
+- Create: `backend/app/db/models/prompt_template.py`
+- Create: `backend/app/services/prompts/service.py`
+- Create: `backend/app/api/deps.py`
+- Modify: `backend/app/core/logging.py`
+- Modify: `backend/app/main.py`
+- Create: `backend/tests/api/test_prompt_templates.py`
+- Create: `frontend/src/api/prompts.ts`
+- Create: `frontend/src/components/RetrievalTraceDrawer.tsx`
+- Create: `frontend/src/pages/PromptTemplatesPage.tsx`
+
+**步骤 1：先写失败测试**
+
+```python
+def test_prompt_template_can_be_created_and_activated(client):
+    response = client.post("/api/prompts", json={"name": "default-policy", "template": "..."})
+    assert response.status_code == 201
+    assert response.json()["status"] == "draft"
+```
+
+**步骤 2：运行测试，确认先失败**
+
+Run: `cd backend && uv run pytest tests/api/test_prompt_templates.py -v`
+Expected: FAIL because prompt template APIs are missing.
+
+**步骤 3：写最小实现**
+
+- 增加 Prompt 模板 CRUD，并保证同一任务类型只有一个激活版本。
+- 将 LlamaIndex 检索过程、召回候选和最终上下文写入 `rag_recall_log`。
+- 结构化日志中补充 request id、tenant id、耗时、token 用量和模型名。
+- 用 OpenTelemetry 对 API 与 Worker 进行埋点。
+- 管理端增加 Prompt 配置页与检索链路查看面板。
+
+**步骤 4：运行验证**
+
+Run: `cd backend && uv run pytest tests/api/test_prompt_templates.py -v`
+Expected: PASS.
+
+Run: `cd backend && uv run pytest -k "prompt or recall_log" -v`
+Expected: PASS.
+
+**步骤 5：提交**
+
+```bash
+git add backend/app/api/routes/prompt_templates.py backend/app/db/models/prompt_template.py backend/app/services/prompts/service.py backend/app/core/logging.py backend/app/main.py backend/tests/api/test_prompt_templates.py frontend/src/api/prompts.ts frontend/src/components/RetrievalTraceDrawer.tsx frontend/src/pages/PromptTemplatesPage.tsx
+git commit -m "feat: add prompt management and observability"
+```
+
+### 任务 5：升级为混合检索与离线评测
+
+**Files:**
+- Create: `backend/app/services/rag/query_rewriter.py`
+- Modify: `backend/app/services/rag/query_engine.py`
+- Modify: `backend/app/services/rag/retrievers.py`
+- Create: `backend/app/services/rag/rerankers.py`
+- Create: `backend/app/db/models/eval.py`
+- Create: `backend/app/services/eval/dataset_loader.py`
+- Create: `backend/app/services/eval/runner.py`
+- Create: `backend/app/api/routes/evals.py`
+- Create: `backend/tests/rag/test_hybrid_retrieval.py`
+- Create: `backend/tests/eval/test_eval_runner.py`
+- Create: `frontend/src/api/evals.ts`
+- Create: `frontend/src/pages/EvalPage.tsx`
+
+**步骤 1：先写失败测试**
+
+```python
+def test_hybrid_retrieval_prefers_exact_policy_keyword_matches(seed_data):
+    result = retrieve("hotel limit for beijing", tenant_id="t1")
+    assert result.top_hits[0].document_title == "Beijing Travel Policy"
+```
+
+```python
+def test_eval_runner_persists_metrics(eval_dataset):
+    run = run_eval(eval_dataset_id="dataset-1")
+    assert run.metrics["answer_recall"] >= 0
+```
+
+**步骤 2：运行测试，确认先失败**
+
+Run: `cd backend && uv run pytest tests/rag/test_hybrid_retrieval.py tests/eval/test_eval_runner.py -v`
+Expected: FAIL because hybrid retriever assembly and eval modules are missing.
+
+**步骤 3：写最小实现**
+
+- 在 LlamaIndex 中装配 Milvus dense / sparse 检索与结构化过滤。
+- 增加可选的 Query 改写，用于支持运营缩写和政策别名。
+- 在生成答案前增加 Rerank。
+- 建立带标准答案和标准引用的评测集。
+- 跟踪检索命中率、引用准确率、答案完整度和人工通过率。
+- 管理端增加评测运行触发和结果查看页面。
+
+**步骤 4：运行验证**
+
+Run: `cd backend && uv run pytest tests/rag/test_hybrid_retrieval.py tests/eval/test_eval_runner.py -v`
+Expected: PASS.
+
+Run: `cd backend && uv run pytest -k "hybrid or eval" -v`
+Expected: PASS.
+
+**步骤 5：提交**
+
+```bash
+git add backend/app/services/rag/query_rewriter.py backend/app/services/rag/query_engine.py backend/app/services/rag/retrievers.py backend/app/services/rag/rerankers.py backend/app/db/models/eval.py backend/app/services/eval backend/app/api/routes/evals.py backend/tests/rag/test_hybrid_retrieval.py backend/tests/eval/test_eval_runner.py frontend/src/api/evals.ts frontend/src/pages/EvalPage.tsx
+git commit -m "feat: add hybrid retrieval and offline evaluation"
+```
+### 任务 6：增加 Query Router 与首批 Agent 工作流
+
+**Files:**
+- Create: `backend/app/api/routes/agents.py`
+- Create: `backend/app/db/models/agent.py`
+- Create: `backend/app/schemas/agent.py`
+- Create: `backend/app/services/agents/state.py`
+- Create: `backend/app/services/agents/router.py`
+- Create: `backend/app/services/agents/graph.py`
+- Create: `backend/app/services/agents/nodes.py`
+- Create: `backend/app/services/agents/policy_graph.py`
+- Create: `backend/app/services/agents/anomaly_graph.py`
+- Create: `backend/app/services/agents/ticket_router_graph.py`
+- Create: `backend/app/services/agents/tools.py`
+- Create: `backend/tests/agents/test_router.py`
+- Create: `backend/tests/agents/test_ticket_router.py`
+- Create: `frontend/src/api/agents.ts`
+- Create: `frontend/src/components/RunTimeline.tsx`
+- Create: `frontend/src/pages/AgentRunsPage.tsx`
+
+**步骤 1：先写失败测试**
+
+```python
+def test_router_sends_policy_question_to_rag_agent():
+    route = choose_route("What is the hotel cap in Shanghai?")
+    assert route.agent_name == "travel_policy_agent"
+```
+
+```python
+def test_ticket_router_agent_returns_queue_and_reason(seed_ticket):
+    result = run_ticket_router(seed_ticket)
+    assert result.queue_name
+    assert result.reason
+```
+
+**步骤 2：运行测试，确认先失败**
+
+Run: `cd backend && uv run pytest tests/agents/test_router.py tests/agents/test_ticket_router.py -v`
+Expected: FAIL because LangGraph router and workflow graphs do not exist.
+
+**步骤 3：写最小实现**
+
+- 基于意图和置信度阈值实现一个轻量级 Router。
+- 用 LangGraph 显式定义 state、nodes、edges 和人工审核检查点。
+- 至少实现两个工具：订单查询和工单队列查询。
+- 将每次状态流转、模型调用和工具调用都写入 `agent_run` 与 `tool_call_log`。
+- 管理端增加运行时间线和失败记录查看页。
+
+**步骤 4：运行验证**
+
+Run: `cd backend && uv run pytest tests/agents/test_router.py tests/agents/test_ticket_router.py -v`
+Expected: PASS.
+
+Run: `cd backend && uv run pytest -k agents -v`
+Expected: PASS.
+
+**步骤 5：提交**
+
+```bash
+git add backend/app/api/routes/agents.py backend/app/db/models/agent.py backend/app/schemas/agent.py backend/app/services/agents backend/tests/agents frontend/src/api/agents.ts frontend/src/components/RunTimeline.tsx frontend/src/pages/AgentRunsPage.tsx
+git commit -m "feat: add langgraph agent workflows"
+```
+### 任务 7：增加规则引擎与人工审核队列
+
+**Files:**
+- Create: `backend/app/api/routes/rules.py`
+- Create: `backend/app/api/routes/reviews.py`
+- Create: `backend/app/db/models/rule.py`
+- Create: `backend/app/services/rules/engine.py`
+- Create: `backend/tests/rules/test_rule_engine.py`
+- Create: `backend/tests/api/test_review_queue.py`
+- Create: `frontend/src/api/reviews.ts`
+- Create: `frontend/src/components/RuleResultPanel.tsx`
+- Create: `frontend/src/pages/ReviewQueuePage.tsx`
+
+**步骤 1：先写失败测试**
+
+```python
+def test_rule_engine_blocks_out_of_policy_amount():
+    result = evaluate_rules({"amount": 2500, "city_tier": "tier-2", "expense_type": "hotel"})
+    assert result.decision == "blocked"
+```
+
+```python
+def test_low_confidence_agent_result_creates_review_case(client):
+    response = client.post("/api/reviews/ingest", json={"source": "agent", "confidence": 0.32})
+    assert response.status_code == 201
+```
+
+**步骤 2：运行测试，确认先失败**
+
+Run: `cd backend && uv run pytest tests/rules/test_rule_engine.py tests/api/test_review_queue.py -v`
+Expected: FAIL because rules and review APIs are missing.
+
+**步骤 3：写最小实现**
+
+- 将政策规则存成结构化条件，而不是只保存自然语言。
+- 在检索或 Agent 输出之后、最终结果返回之前执行规则校验。
+- 将低置信度、规则冲突或缺乏证据的结果送入审核队列。
+- 前端展示规则命中、拦截原因和建议处理动作。
+- 持久化人工覆盖原因，满足审计要求。
+
+**步骤 4：运行验证**
+
+Run: `cd backend && uv run pytest tests/rules/test_rule_engine.py tests/api/test_review_queue.py -v`
+Expected: PASS.
+
+Run: `cd backend && uv run pytest -k "rules or review" -v`
+Expected: PASS.
+
+**步骤 5：提交**
+
+```bash
+git add backend/app/api/routes/rules.py backend/app/api/routes/reviews.py backend/app/db/models/rule.py backend/app/services/rules/engine.py backend/tests/rules/test_rule_engine.py backend/tests/api/test_review_queue.py frontend/src/api/reviews.ts frontend/src/components/RuleResultPanel.tsx frontend/src/pages/ReviewQueuePage.tsx
+git commit -m "feat: add rule engine and review workflow"
+```
+
+### 任务 8：容器化、安全基线与部署准备
+
+**Files:**
+- Create: `infra/docker/backend.Dockerfile`
+- Create: `infra/docker/frontend.Dockerfile`
+- Create: `infra/k8s/api-deployment.yaml`
+- Create: `infra/k8s/worker-deployment.yaml`
+- Create: `infra/k8s/web-deployment.yaml`
+- Create: `infra/k8s/ingress.yaml`
+- Create: `infra/monitoring/prometheus.yaml`
+- Create: `infra/monitoring/grafana-dashboards.json`
+- Modify: `backend/app/core/security.py`
+- Modify: `.env.example`
+- Create: `backend/tests/api/test_authz.py`
+
+**步骤 1：先写失败测试**
+
+```python
+def test_operator_without_admin_role_cannot_edit_prompt_template(client, operator_token):
+    response = client.post("/api/prompts", headers={"Authorization": f"Bearer {operator_token}"}, json={})
+    assert response.status_code == 403
+```
+
+**步骤 2：运行测试，确认先失败**
+
+Run: `cd backend && uv run pytest tests/api/test_authz.py -v`
+Expected: FAIL because authorization policy is incomplete.
+
+**步骤 3：写最小实现**
+
+- 增加 admin、operator、reviewer 三类角色的权限控制。
+- 构建 API、Worker 和 Web 的生产镜像。
+- 增加 Kubernetes 清单，包括健康检查、资源限制、Secrets 和 ConfigMap。
+- 暴露请求延迟、任务吞吐、评测运行、Agent 失败率和 Token 用量等指标。
+- 制定发布路径：本地 compose、测试环境 Kubernetes、API 先灰度。
+
+**步骤 4：运行验证**
+
+Run: `cd backend && uv run pytest tests/api/test_authz.py -v`
+Expected: PASS.
+
+Run: `docker build -f infra/docker/backend.Dockerfile .`
+Expected: PASS.
+
+Run: `kubectl apply --dry-run=client -f infra/k8s`
+Expected: PASS.
+
+**步骤 5：提交**
+
+```bash
+git add infra backend/app/core/security.py backend/tests/api/test_authz.py .env.example
+git commit -m "chore: add deployment and security baseline"
+```
+
+## 明确延后处理的事项
+
+- 初期不要上微服务。
+- 不要让 LlamaIndex 和 LangChain 高层 Agent 同时接管同一条主业务链路。
+- 在单 Agent 链路还不透明之前，不要做多 Agent 编排。
+- 在政策问答评测指标稳定前，不要增加发票 OCR 或邮件自动回复。
+- 初期不要训练自定义模型，优先优化 Prompt、检索、Rerank 和规则。
+- 在 Milvus 内建混合检索与 Rerank 能力证明确实不够之前，不要单独引入 OpenSearch 集群。
+
+## 交付风险与缓解措施
+
+| 风险 | 为什么重要 | 缓解方案 |
+| --- | --- | --- |
+| 不同文档格式的解析质量差异大 | 坏切块会直接破坏检索质量 | 第一阶段只支持 DOCX 和 PDF，增加格式专项测试，并记录解析失败原因 |
+| 元数据质量不稳定 | 错误的租户或版本会造成不安全回答 | 上传流程强制要求租户和文档版本字段 |
+| 混合检索在线效果不如离线效果 | 离线评测提升不一定转化为业务价值 | 建立人工反馈闭环，并衡量引用是否真的有用 |
+| Agent 路由过程不透明 | 面试演示和排障时都难以建立信任 | 持久化每次路由、工具调用和置信度 |
+| 规则覆盖不足 | LLM 可能答得像对，但仍然违反业务规则 | 所有最终动作前都加确定性后置校验 |
+| 基础设施过早复杂化 | 项目可能还没出业务价值就先被运维拖慢 | 前两个阶段只保留一个应用和一个 Worker |
+
+## 近期首个 Sprint 建议
+
+1. 完整完成任务 1。
+2. 完成任务 2，但只支持 DOCX 和 PDF。
+3. 完成任务 3，只打通“政策问答 + 引用展示”这一条业务闭环。
+4. 用 3 份文档、10 个精选问题和可视化检索证据做一次演示。
+
+计划文件已保存到 `docs/plans/2026-04-01-travel-ops-copilot.md`。后续有两种执行方式：
+
+**1. 当前会话继续推进**：按任务逐步实现，并在每个阶段做校验。
+
+**2. 单独开实现会话**：在新会话中按这份计划分阶段执行，并在关键节点做 review。
+
+
+
+
+
