@@ -79,7 +79,13 @@ docker compose down
 - `CELERY_TASK_ALWAYS_EAGER`: 默认 `true`，开发阶段上传任务在 API 进程内立即执行，无需单独启动 worker
 - `CHAT_TOP_K`: 问答阶段默认取前 `3` 条候选证据
 - `CHAT_CONFIDENCE_THRESHOLD`: 默认 `0.2`，低于阈值时返回低置信度兜底答复
+- `CORS_ALLOW_ORIGINS`: 后端允许跨域的前端来源，默认放通本地 `5173/4173` 的 `localhost` 和 `127.0.0.1`
 - `VITE_API_BASE_URL`: 前端请求后端 API 的地址，开发模式下默认写成 `http://localhost:8000`
+
+如果浏览器提示跨域，先确认两件事：
+
+- 后端已经从最新 `.env` 读取到 `CORS_ALLOW_ORIGINS`
+- 前端实际访问地址在允许列表内，例如 `http://127.0.0.1:5173` 或 `http://localhost:5173`
 
 ## 应用启动
 

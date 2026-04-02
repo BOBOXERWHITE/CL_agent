@@ -9,11 +9,20 @@ def _as_bool(value: str | None, default: bool) -> bool:
     return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _as_csv_tuple(value: str | None, default: tuple[str, ...]) -> tuple[str, ...]:
+    if value is None:
+        return default
+
+    items = tuple(part.strip() for part in value.split(",") if part.strip())
+    return items or default
+
+
 @dataclass(frozen=True)
 class Settings:
     app_name: str
     app_env: str
     log_level: str
+    cors_allow_origins: tuple[str, ...]
     database_url: str
     object_storage_provider: str
     object_storage_root: str
@@ -42,6 +51,15 @@ def get_settings() -> Settings:
         app_name=os.getenv("APP_NAME", "Travel Ops Copilot API"),
         app_env=os.getenv("APP_ENV", "development"),
         log_level=os.getenv("LOG_LEVEL", "INFO"),
+        cors_allow_origins=_as_csv_tuple(
+            os.getenv("CORS_ALLOW_ORIGINS"),
+            default=(
+                "http://localhost:5173",
+                "http://127.0.0.1:5173",
+                "http://localhost:4173",
+                "http://127.0.0.1:4173",
+            ),
+        ),
         database_url=os.getenv(
             "DATABASE_URL",
             "postgresql+psycopg://travel_ops:travel_ops@localhost:5432/travel_ops",
