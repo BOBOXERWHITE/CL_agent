@@ -7,5 +7,7 @@ backend/.pytest_cache/
 frontend/node_modules/
 frontend/dist/
 frontend/*.tsbuildinfo
+.env
+frontend/.env
 ~$*.docx
 .DS_Store

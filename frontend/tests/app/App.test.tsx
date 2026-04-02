@@ -1,8 +1,20 @@
 import { render, screen } from "@testing-library/react";
+import { vi } from "vitest";
 
 import App from "../../src/app/App";
 
-test("renders app shell title", () => {
+vi.mock("../../src/api/knowledge", () => ({
+  listKnowledgeJobs: vi.fn().mockResolvedValue([]),
+  uploadKnowledgeDocument: vi.fn(),
+}));
+
+vi.mock("../../src/api/chat", () => ({
+  askPolicyQuestion: vi.fn(),
+}));
+
+test("renders app shell title", async () => {
   render(<App />);
-  expect(screen.getByText("Travel Ops Copilot")).toBeInTheDocument();
+  expect(screen.getByRole("heading", { name: "差旅智能运营台" })).toBeInTheDocument();
+  await screen.findByRole("heading", { name: "文档进入系统的第一站" });
+  await screen.findByRole("heading", { name: "先看依据，再看结论" });
 });

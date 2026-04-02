@@ -1,0 +1,131 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+from app.core.config import get_settings
+from app.services.rag.index_builder import VectorRecord, text_to_embedding
+from app.services.rag.settings import get_rag_settings
+
+
+@dataclass(frozen=True)
+class VectorSearchHit:
+    chunk_id: str
+    score: float
+
+
+class NoopVectorStore:
+    def upsert(self, records: list[VectorRecord]) -> dict[str, str]:
+        return {record.chunk_id: f"noop:{record.chunk_id}" for record in records}
+
+    def search(self, *, query_text: str, tenant_id: str, customer_id: str, top_k: int) -> list[tuple[str, float]]:
+        del query_text, tenant_id, customer_id, top_k
+        return []
+
+
+class MilvusVectorStore:
+    def __init__(self) -> None:
+        from pymilvus import Collection, CollectionSchema, DataType, FieldSchema, connections, utility
+
+        settings = get_settings()
+        rag_settings = get_rag_settings()
+
+        connections.connect(
+            alias="travel_ops",
+            host=settings.milvus_host,
+            port=str(settings.milvus_port),
+        )
+
+        self._collection_name = rag_settings.milvus_collection_name
+        self._collection_cls = Collection
+        self._utility = utility
+        self._schema_cls = CollectionSchema
+        self._field_cls = FieldSchema
+        self._datatype = DataType
+        self._embedding_dimension = rag_settings.embedding_dimension
+
+    def _ensure_collection(self):
+        if self._utility.has_collection(self._collection_name, using="travel_ops"):
+            return self._collection_cls(self._collection_name, using="travel_ops")
+
+        schema = self._schema_cls(
+            fields=[
+                self._field_cls(
+                    name="chunk_id",
+                    dtype=self._datatype.VARCHAR,
+                    is_primary=True,
+                    auto_id=False,
+                    max_length=64,
+                ),
+                self._field_cls(name="document_id", dtype=self._datatype.VARCHAR, max_length=64),
+                self._field_cls(name="tenant_id", dtype=self._datatype.VARCHAR, max_length=64),
+                self._field_cls(name="customer_id", dtype=self._datatype.VARCHAR, max_length=64),
+                self._field_cls(
+                    name="embedding",
+                    dtype=self._datatype.FLOAT_VECTOR,
+                    dim=self._embedding_dimension,
+                ),
+            ],
+            description="Knowledge chunk embeddings",
+        )
+
+        collection = self._collection_cls(
+            self._collection_name,
+            schema=schema,
+            using="travel_ops",
+        )
+        collection.create_index(
+            field_name="embedding",
+            index_params={"index_type": "AUTOINDEX", "metric_type": "IP"},
+        )
+        return collection
+
+    def upsert(self, records: list[VectorRecord]) -> dict[str, str]:
+        collection = self._ensure_collection()
+        if not records:
+            return {}
+
+        collection.insert(
+            [
+                [record.chunk_id for record in records],
+                [record.document_id for record in records],
+                [record.tenant_id for record in records],
+                [record.customer_id for record in records],
+                [record.embedding for record in records],
+            ]
+        )
+        collection.flush()
+        return {record.chunk_id: record.chunk_id for record in records}
+
+    def search(self, *, query_text: str, tenant_id: str, customer_id: str, top_k: int) -> list[tuple[str, float]]:
+        if top_k <= 0:
+            return []
+
+        if not self._utility.has_collection(self._collection_name, using="travel_ops"):
+            return []
+
+        collection = self._collection_cls(self._collection_name, using="travel_ops")
+        collection.load()
+        query_vector = text_to_embedding(query_text, self._embedding_dimension)
+        safe_tenant = tenant_id.replace("\\", "\\\\").replace('"', '\\"')
+        safe_customer = customer_id.replace("\\", "\\\\").replace('"', '\\"')
+        expr = f'tenant_id == "{safe_tenant}" and customer_id == "{safe_customer}"'
+        search_result = collection.search(
+            data=[query_vector],
+            anns_field="embedding",
+            param={"metric_type": "IP", "params": {}},
+            limit=top_k,
+            expr=expr,
+            output_fields=["chunk_id"],
+        )
+
+        hits: list[tuple[str, float]] = []
+        for hit in search_result[0]:
+            hits.append((str(hit.entity.get("chunk_id") or hit.id), float(hit.distance)))
+        return hits
+
+
+def get_vector_store() -> NoopVectorStore | MilvusVectorStore:
+    settings = get_settings()
+    if settings.vector_store_provider == "milvus":
+        return MilvusVectorStore()
+    return NoopVectorStore()
