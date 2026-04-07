@@ -2,7 +2,9 @@ import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { vi } from "vitest";
 
 import App from "../../src/app/App";
+import * as chatApi from "../../src/api/chat";
 import * as knowledgeApi from "../../src/api/knowledge";
+import * as promptsApi from "../../src/api/prompts";
 
 
 vi.mock("../../src/api/knowledge", () => ({
@@ -10,6 +12,25 @@ vi.mock("../../src/api/knowledge", () => ({
   uploadKnowledgeDocument: vi.fn(),
 }));
 
+vi.mock("../../src/api/chat", () => ({
+  askPolicyQuestion: vi.fn(),
+}));
+
+vi.mock("../../src/api/prompts", () => ({
+  createPromptTemplate: vi.fn(),
+  listPromptTemplates: vi.fn(),
+  activatePromptTemplate: vi.fn(),
+}));
+
+vi.mock("../../src/api/evals", () => ({
+  listEvalRuns: vi.fn().mockResolvedValue([]),
+  triggerEvalRun: vi.fn(),
+}));
+
+vi.mock("../../src/api/agents", () => ({
+  listAgentRuns: vi.fn().mockResolvedValue([]),
+  createAgentRun: vi.fn(),
+}));
 
 test("uploads a document and renders the returned job", async () => {
   vi.mocked(knowledgeApi.listKnowledgeJobs).mockResolvedValueOnce([]);
@@ -18,6 +39,13 @@ test("uploads a document and renders the returned job", async () => {
     document_id: "doc-1",
     status: "completed",
   });
+  vi.mocked(chatApi.askPolicyQuestion).mockResolvedValue({
+    session_id: "session-1",
+    answer: "根据当前政策证据，国内出差应优先预订 economy class。",
+    confidence: 0.92,
+    citations: [],
+  });
+  vi.mocked(promptsApi.listPromptTemplates).mockResolvedValue([]);
   vi.mocked(knowledgeApi.listKnowledgeJobs).mockResolvedValueOnce([
     {
       job_id: "job-1",

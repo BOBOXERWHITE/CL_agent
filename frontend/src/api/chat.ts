@@ -1,3 +1,5 @@
+import { postJson } from "./client";
+
 export interface Citation {
   chunk_id: string;
   document_id: string;
@@ -6,11 +8,31 @@ export interface Citation {
   score: number;
 }
 
+export interface RetrievalTraceChunk {
+  chunk_id: string;
+  document_id: string;
+  document_title: string;
+  score: number;
+}
+
+export interface RetrievalTrace {
+  mode: string;
+  prompt_name: string;
+  prompt_version: number;
+  model_name: string;
+  token_usage: {
+    input_tokens: number;
+    output_tokens: number;
+  };
+  selected_chunks: RetrievalTraceChunk[];
+}
+
 export interface ChatAnswer {
   session_id: string;
   answer: string;
   confidence: number;
   citations: Citation[];
+  retrieval_trace?: RetrievalTrace | null;
 }
 
 interface AskPolicyQuestionInput {
@@ -20,25 +42,11 @@ interface AskPolicyQuestionInput {
   sessionId?: string;
 }
 
-const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? "";
-
 export async function askPolicyQuestion(input: AskPolicyQuestionInput): Promise<ChatAnswer> {
-  const response = await fetch(`${API_BASE_URL}/api/chat/ask`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      question: input.question,
-      tenant_id: input.tenantId ?? "default-tenant",
-      customer_id: input.customerId ?? "default-customer",
-      session_id: input.sessionId ?? null,
-    }),
+  return postJson<ChatAnswer>("/api/chat/ask", {
+    question: input.question,
+    tenant_id: input.tenantId ?? "default-tenant",
+    customer_id: input.customerId ?? "default-customer",
+    session_id: input.sessionId ?? null,
   });
-
-  if (!response.ok) {
-    throw new Error(`request failed with status ${response.status}`);
-  }
-
-  return (await response.json()) as ChatAnswer;
 }

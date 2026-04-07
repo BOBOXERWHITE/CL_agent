@@ -69,7 +69,7 @@ export default function DocumentUploader({ disabled = false, onSubmit }: Documen
       <div className="upload-form__footer">
         <div className="upload-form__hint">
           <strong>入库提示</strong>
-          <p>{file ? `当前文件：${file.name}` : "支持上传 DOCX / PDF，系统会自动解析并切块。"}</p>
+          <p>{file ? `当前文件：${file.name}` : "支持上传 DOCX / PDF，系统会自动解析、切块并写入向量库。"}</p>
         </div>
         <button type="submit" disabled={disabled}>
           开始入库
@@ -77,7 +77,7 @@ export default function DocumentUploader({ disabled = false, onSubmit }: Documen
       </div>
       {errorMessage ? <p className="panel__error">{errorMessage}</p> : null}
       <p className="upload-form__caption">
-        租户和客户字段会一并写入元数据，用于后续检索隔离和追踪。
+        租户和客户字段会一并写入元数据，用于后续检索隔离和问题追踪。
       </p>
     </form>
   );

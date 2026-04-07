@@ -54,10 +54,28 @@ SessionLocal = _SessionLocalProxy()
 
 
 def init_db() -> None:
+    from app.db.models.agent import AgentRun, ToolCallLog
     from app.db.models.conversation import ChatMessage, ChatSession
+    from app.db.models.eval import EvalDataset, EvalRun
     from app.db.models.knowledge import KnowledgeChunk, KnowledgeDocument
+    from app.db.models.prompt_template import PromptTemplate
+    from app.db.models.rag_recall_log import RagRecallLog
+    from app.db.models.rule import PolicyRule, ReviewCase
 
-    del ChatMessage, ChatSession, KnowledgeChunk, KnowledgeDocument
+    del (
+        AgentRun,
+        ChatMessage,
+        ChatSession,
+        EvalDataset,
+        EvalRun,
+        KnowledgeChunk,
+        KnowledgeDocument,
+        PolicyRule,
+        PromptTemplate,
+        RagRecallLog,
+        ReviewCase,
+        ToolCallLog,
+    )
     Base.metadata.create_all(bind=get_engine())
 
 

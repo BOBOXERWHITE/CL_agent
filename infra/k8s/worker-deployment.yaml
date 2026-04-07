@@ -1,0 +1,36 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: travel-ops-worker
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: travel-ops-worker
+  template:
+    metadata:
+      labels:
+        app: travel-ops-worker
+    spec:
+      containers:
+        - name: worker
+          image: travel-ops-api:latest
+          imagePullPolicy: IfNotPresent
+          command:
+            - celery
+            - -A
+            - app.workers.celery_app.celery_app
+            - worker
+            - --loglevel=info
+          envFrom:
+            - configMapRef:
+                name: travel-ops-config
+            - secretRef:
+                name: travel-ops-secrets
+          resources:
+            requests:
+              cpu: 250m
+              memory: 512Mi
+            limits:
+              cpu: "1"
+              memory: 1Gi

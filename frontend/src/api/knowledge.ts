@@ -1,3 +1,5 @@
+import { createFormHeaders, requestJson } from "./client";
+
 export interface KnowledgeUploadAccepted {
   job_id: string;
   document_id: string;
@@ -26,16 +28,6 @@ interface UploadKnowledgeDocumentInput {
   file: File;
 }
 
-const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? "";
-
-async function requestJson<T>(path: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(`${API_BASE_URL}${path}`, init);
-  if (!response.ok) {
-    throw new Error(`request failed with status ${response.status}`);
-  }
-  return (await response.json()) as T;
-}
-
 export async function listKnowledgeJobs(): Promise<KnowledgeJob[]> {
   const response = await requestJson<KnowledgeJobListResponse>("/api/knowledge/jobs");
   return response.items;
@@ -51,6 +43,7 @@ export async function uploadKnowledgeDocument(
 
   return requestJson<KnowledgeUploadAccepted>("/api/knowledge/upload", {
     method: "POST",
+    headers: createFormHeaders(),
     body: formData,
   });
 }

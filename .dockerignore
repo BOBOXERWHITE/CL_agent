@@ -1,0 +1,12 @@
+.git
+.pytest_cache
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.env
+frontend/node_modules
+frontend/dist
+frontend/tsconfig.tsbuildinfo
+backend/.pytest_cache
+backend/travel_ops_copilot_backend.egg-info

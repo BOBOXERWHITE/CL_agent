@@ -25,6 +25,7 @@
 - 上传并管理差旅制度、客户合同、FAQ、SOP 和帮助中心等文档。
 - 将 DOCX、PDF、XLSX、HTML 和邮件类内容解析为标准化知识记录。
 - 按块切分内容，并保留租户、客户、文档类型、生效时间、版本号、访问控制等元数据。
+- 必须支持中文文档、中文问题和中英混合问题的检索与问答，不能长期依赖只适配英文 token 的占位实现。
 - 生成向量并保存知识分块，支持查看文档处理状态。
 - 回答政策问题时必须返回引用、命中文本片段和置信度分数。
 - 持久化会话记录、Prompt 模板、检索链路、Agent 运行过程和人工反馈。
@@ -39,6 +40,7 @@
 - 50 页文档的异步入库处理 SLA 控制在 2 分钟内。
 - 内部平台可用性目标为 99.9%。
 - 可观测性要求：每次请求都必须记录结构化日志、链路追踪、模型用量和检索证据。
+- 评测要求：混合检索与问答评测集必须覆盖中文政策问题、中文文档和中英混合问法，不能只验证英文样例。
 - 安全要求：管理端必须鉴权、支持基于角色的权限控制、租户隔离、传输加密、日志脱敏。
 - 可靠性要求：低置信度答案不能直接给出最终决策，前端必须能展示兜底或升级处理路径。
 
@@ -260,6 +262,7 @@ docs/
 6. 增加 Query Router 和一到两个工具型 Agent。
 7. 增加规则引擎和人工审核队列。
 8. 完成容器化、Kubernetes 清单、监控告警和发布控制。
+9. 增加真实模型网关接入，并保留 deterministic 本地回退链路。
 
 ## 实施任务
 
@@ -550,11 +553,59 @@ Expected: FAIL because hybrid retriever assembly and eval modules are missing.
 **步骤 3：写最小实现**
 
 - 在 LlamaIndex 中装配 Milvus dense / sparse 检索与结构化过滤。
+- 替换当前只适合英文 token 的占位式 embedding / lexical 检索逻辑，升级为可支持中文文本、中文问题和中英混合问法的实现。
 - 增加可选的 Query 改写，用于支持运营缩写和政策别名。
 - 在生成答案前增加 Rerank。
-- 建立带标准答案和标准引用的评测集。
+- 建立带标准答案和标准引用的评测集，至少覆盖中文政策问答、城市名/费用类型等中文实体，以及中英混合表达。
 - 跟踪检索命中率、引用准确率、答案完整度和人工通过率。
 - 管理端增加评测运行触发和结果查看页面。
+
+**中文检索升级子任务**
+
+#### 子任务 5.1：建立中文检索基线样本
+
+- 从现有差旅制度、酒店限额、机票舱位、报销规则文档中抽取一组中文问题样本。
+- 样本必须同时覆盖三类输入：纯中文问题、中英混合问题、英文问题。
+- 每条样本至少标注：问题、期望命中文档、期望 chunk 关键词、标准答案、标准引用。
+- 至少覆盖以下实体类型：城市名、费用类型、舱位类型、金额上限、审批条件。
+- 将这批样本沉淀为评测集，而不是只做手工测试。
+
+#### 子任务 5.2：替换当前占位式中文不友好的检索实现
+
+- 移除当前只依赖 `[a-zA-Z0-9]+` token 的简化 embedding / lexical 检索逻辑作为主方案。
+- 引入支持中文语义的 embedding 方案，用于替换当前本地 hash bucket 向量实现。
+- 引入支持中文的 lexical 检索策略，至少满足以下之一：
+  - 中文分词检索
+  - 字符 n-gram 检索
+  - 中文 sparse 检索
+- 要求 dense 检索和 lexical 检索都能处理中文文本，而不是只在英文问题下有效。
+- 保留租户、客户、文档状态过滤，不得因为升级中文检索而破坏数据隔离。
+
+#### 子任务 5.3：组装中文可用的混合检索链路
+
+- 将中文 embedding 检索、中文 lexical 检索、结构化过滤统一组装成 hybrid retrieval。
+- 增加 Query 改写层，用于处理差旅缩写、城市别名、费用别名、中英混合表达。
+- 在 hybrid retrieval 之后增加 Rerank，确保最终进入上下文的 chunks 更稳定。
+- retrieval trace 中必须记录 dense 命中、lexical 命中、Rerank 后结果和最终 selected chunks。
+- 对中文问题要能解释“为什么命中这些 chunk”，不能只返回最终答案。
+
+#### 子任务 5.4：建立中文专项评测与回归门槛
+
+- 新增中文专项评测指标：
+  - 答案正确率
+  - 中文引用准确率
+  - 中英混合问题命中率
+  - 低置信度占比
+- 为城市限额、舱位规则、报销口径准备最少一组回归问题集。
+- 验收门槛不能只看“能返回答案”，必须同时看引用是否正确、`0%` 置信度是否显著下降。
+- 如果中文问题仍大量命中失败，即使英文评测通过，也不能视为 Task 5 完成。
+
+#### 子任务 5.5：中文检索升级的交付标准
+
+- 对同一批样本，中文问题与中英混合问题不应再大面积出现“无引用 + 0% 置信度”。
+- 数据库中的 `rag_recall_log` 应能清晰展示中文问题的检索链路和最终命中 chunks。
+- 前端 `retrieval_trace` 面板应能用于人工核查中文问题是否命中了正确证据。
+- 如果当前模型或向量策略仍不足以支撑中文效果，必须在任务收尾时明确记录遗留问题，而不是模糊带过。
 
 **步骤 4：运行验证**
 
@@ -563,6 +614,9 @@ Expected: PASS.
 
 Run: `cd backend && uv run pytest -k "hybrid or eval" -v`
 Expected: PASS.
+
+Run: 使用中文问题、中英混合问题和英文问题各准备一组样本进行手工回归验证
+Expected: 中文与中英混合问题能够命中正确 chunks，并返回可解释引用，而不是大面积出现 `0%` 置信度。
 
 **步骤 5：提交**
 
@@ -741,6 +795,68 @@ git add infra backend/app/core/security.py backend/tests/api/test_authz.py .env.
 git commit -m "chore: add deployment and security baseline"
 ```
 
+### 任务 9：真实模型网关接入与本地回退
+
+**Files:**
+- Modify: `backend/app/core/config.py`
+- Modify: `backend/app/services/llm/client.py`
+- Create: `backend/app/services/rag/embedding_client.py`
+- Modify: `backend/app/services/rag/index_builder.py`
+- Modify: `backend/app/services/rag/query_engine.py`
+- Modify: `backend/pyproject.toml`
+- Modify: `.env.example`
+- Modify: `README.md`
+- Create: `backend/tests/llm/test_client.py`
+- Create: `backend/tests/rag/test_embedding_client.py`
+
+**步骤 1：先写失败测试**
+
+```python
+def test_openai_compatible_policy_client_parses_gateway_response():
+    client = OpenAICompatiblePolicyAnswerClient(...)
+    draft = client.generate_answer(question="北京酒店报销上限是多少", citations=[])
+    assert draft.model_name == "gpt-4o-mini"
+```
+
+```python
+def test_openai_compatible_embedding_client_parses_gateway_response():
+    client = OpenAICompatibleEmbeddingClient(...)
+    vectors = client.embed_texts(["北京酒店报销上限"], dimension=4)
+    assert vectors[0] == [0.1, 0.2, 0.3, 0.4]
+```
+
+**步骤 2：运行测试，确认先失败**
+
+Run: `cd backend && uv run pytest tests/llm/test_client.py tests/rag/test_embedding_client.py -v`
+Expected: FAIL because OpenAI-compatible gateway clients do not exist.
+
+**步骤 3：写最小实现**
+
+- 在 LLM 链路增加 provider 抽象，支持 `deterministic` 与 `openai-compatible`。
+- 在 embedding 链路增加独立 provider 抽象，支持真实 embedding 网关与本地 deterministic 回退。
+- `query_engine` 内部统一通过 provider 工厂获取回答客户端，避免把 deterministic 逻辑写死在主链路里。
+- `index_builder` 改为批量调用 embedding client，便于后续切换真实模型而不改上层入库流程。
+- 当网关未配置或密钥缺失时，系统必须自动回退，不允许因为外部模型缺失而破坏本地开发和测试。
+- `.env.example` 与 `README.md` 必须同步补充模型网关配置说明和验证步骤。
+
+**步骤 4：运行验证**
+
+Run: `cd backend && uv run pytest tests/llm/test_client.py tests/rag/test_embedding_client.py -v`
+Expected: PASS.
+
+Run: `pytest -q backend/tests`
+Expected: PASS.
+
+Run: `cd frontend && npm test && npm run build`
+Expected: PASS because前端接口契约未被破坏。
+
+**步骤 5：提交**
+
+```bash
+git add backend/app/core/config.py backend/app/services/llm/client.py backend/app/services/rag/embedding_client.py backend/app/services/rag/index_builder.py backend/app/services/rag/query_engine.py backend/pyproject.toml backend/tests/llm/test_client.py backend/tests/rag/test_embedding_client.py .env.example README.md
+git commit -m "feat: add model gateway with deterministic fallback"
+```
+
 ## 明确延后处理的事项
 
 - 初期不要上微服务。
@@ -757,6 +873,7 @@ git commit -m "chore: add deployment and security baseline"
 | 不同文档格式的解析质量差异大 | 坏切块会直接破坏检索质量 | 第一阶段只支持 DOCX 和 PDF，增加格式专项测试，并记录解析失败原因 |
 | 元数据质量不稳定 | 错误的租户或版本会造成不安全回答 | 上传流程强制要求租户和文档版本字段 |
 | 混合检索在线效果不如离线效果 | 离线评测提升不一定转化为业务价值 | 建立人工反馈闭环，并衡量引用是否真的有用 |
+| 中文语料检索效果不达标 | 当前差旅政策与运营提问天然以中文为主，如果中文召回差，系统即使架构完整也不可用 | 在任务 5 中明确替换占位检索实现，并用中文样本做专项评测与手工回归 |
 | Agent 路由过程不透明 | 面试演示和排障时都难以建立信任 | 持久化每次路由、工具调用和置信度 |
 | 规则覆盖不足 | LLM 可能答得像对，但仍然违反业务规则 | 所有最终动作前都加确定性后置校验 |
 | 基础设施过早复杂化 | 项目可能还没出业务价值就先被运维拖慢 | 前两个阶段只保留一个应用和一个 Worker |

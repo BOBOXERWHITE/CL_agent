@@ -18,8 +18,30 @@ class CitationPayload(BaseModel):
     score: float
 
 
+class TokenUsagePayload(BaseModel):
+    input_tokens: int = 0
+    output_tokens: int = 0
+
+
+class RetrievalTraceChunkPayload(BaseModel):
+    chunk_id: str
+    document_id: str
+    document_title: str
+    score: float
+
+
+class RetrievalTracePayload(BaseModel):
+    mode: str
+    prompt_name: str
+    prompt_version: int
+    model_name: str
+    token_usage: TokenUsagePayload
+    selected_chunks: list[RetrievalTraceChunkPayload]
+
+
 class ChatAskResponse(BaseModel):
     session_id: str
     answer: str
     confidence: float
     citations: list[CitationPayload]
+    retrieval_trace: RetrievalTracePayload | None = None

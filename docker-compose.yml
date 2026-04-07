@@ -82,6 +82,17 @@ services:
     volumes:
       - milvus_data:/var/lib/milvus
 
+  attu:
+    image: zilliz/attu:v2.5.10
+    container_name: travel-ops-attu
+    environment:
+      MILVUS_URL: milvus:19530
+    depends_on:
+      milvus:
+        condition: service_started
+    ports:
+      - "${ATTU_PORT:-18000}:3000"
+
 volumes:
   postgres_data:
   minio_data:

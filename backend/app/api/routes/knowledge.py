@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, File, Form, HTTPException, UploadFile, status
+from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
 
+from app.core.security import AuthContext, require_roles
 from app.schemas.knowledge import KnowledgeJob, KnowledgeJobList, KnowledgeUploadAccepted
 from app.services.ingestion.pipeline import create_ingestion_job, get_job, list_jobs
 from app.workers.tasks import submit_ingestion
@@ -12,6 +13,7 @@ router = APIRouter(prefix="/api/knowledge", tags=["knowledge"])
 
 @router.post("/upload", response_model=KnowledgeUploadAccepted, status_code=status.HTTP_202_ACCEPTED)
 async def upload_knowledge_document(
+    _: AuthContext = Depends(require_roles("admin", "operator")),
     file: UploadFile = File(...),
     tenant_id: str = Form("default-tenant"),
     customer_id: str = Form("default-customer"),
@@ -41,6 +43,8 @@ async def upload_knowledge_document(
 
 
 @router.get("/jobs", response_model=KnowledgeJobList)
-def list_knowledge_jobs() -> KnowledgeJobList:
+def list_knowledge_jobs(
+    _: AuthContext = Depends(require_roles("admin", "operator")),
+) -> KnowledgeJobList:
     items = [KnowledgeJob.model_validate(item) for item in list_jobs()]
     return KnowledgeJobList(items=items)

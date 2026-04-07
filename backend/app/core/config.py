@@ -23,6 +23,10 @@ class Settings:
     app_env: str
     log_level: str
     cors_allow_origins: tuple[str, ...]
+    auth_enabled: bool
+    auth_admin_tokens: tuple[str, ...]
+    auth_operator_tokens: tuple[str, ...]
+    auth_reviewer_tokens: tuple[str, ...]
     database_url: str
     object_storage_provider: str
     object_storage_root: str
@@ -35,11 +39,19 @@ class Settings:
     milvus_host: str
     milvus_port: int
     milvus_collection_name: str
+    embedding_provider: str
+    embedding_model_name: str
+    embedding_api_base_url: str
+    embedding_api_key: str
     embedding_dimension: int
     chunk_size: int
     chunk_overlap: int
     chat_top_k: int
     chat_confidence_threshold: float
+    llm_provider: str
+    llm_model_name: str
+    llm_api_base_url: str
+    llm_api_key: str
     celery_broker_url: str
     celery_result_backend: str
     celery_task_always_eager: bool
@@ -60,6 +72,10 @@ def get_settings() -> Settings:
                 "http://127.0.0.1:4173",
             ),
         ),
+        auth_enabled=_as_bool(os.getenv("AUTH_ENABLED"), default=False),
+        auth_admin_tokens=_as_csv_tuple(os.getenv("AUTH_ADMIN_TOKENS"), default=("admin-token",)),
+        auth_operator_tokens=_as_csv_tuple(os.getenv("AUTH_OPERATOR_TOKENS"), default=("operator-token",)),
+        auth_reviewer_tokens=_as_csv_tuple(os.getenv("AUTH_REVIEWER_TOKENS"), default=("reviewer-token",)),
         database_url=os.getenv(
             "DATABASE_URL",
             "postgresql+psycopg://travel_ops:travel_ops@localhost:5432/travel_ops",
@@ -75,11 +91,19 @@ def get_settings() -> Settings:
         milvus_host=os.getenv("MILVUS_HOST", "localhost"),
         milvus_port=int(os.getenv("MILVUS_PORT", "19530")),
         milvus_collection_name=os.getenv("MILVUS_COLLECTION_NAME", "knowledge_chunks"),
+        embedding_provider=os.getenv("EMBEDDING_PROVIDER", "deterministic").lower(),
+        embedding_model_name=os.getenv("EMBEDDING_MODEL_NAME", "deterministic-hash-embedding"),
+        embedding_api_base_url=os.getenv("EMBEDDING_API_BASE_URL", os.getenv("LLM_API_BASE_URL", "")).strip(),
+        embedding_api_key=os.getenv("EMBEDDING_API_KEY", os.getenv("LLM_API_KEY", "")).strip(),
         embedding_dimension=int(os.getenv("EMBEDDING_DIMENSION", "16")),
         chunk_size=int(os.getenv("CHUNK_SIZE", "450")),
         chunk_overlap=int(os.getenv("CHUNK_OVERLAP", "1")),
         chat_top_k=int(os.getenv("CHAT_TOP_K", "3")),
         chat_confidence_threshold=float(os.getenv("CHAT_CONFIDENCE_THRESHOLD", "0.2")),
+        llm_provider=os.getenv("LLM_PROVIDER", "deterministic").lower(),
+        llm_model_name=os.getenv("LLM_MODEL_NAME", "deterministic-policy-client"),
+        llm_api_base_url=os.getenv("LLM_API_BASE_URL", "").strip(),
+        llm_api_key=os.getenv("LLM_API_KEY", "").strip(),
         celery_broker_url=os.getenv("CELERY_BROKER_URL", "redis://localhost:6379/0"),
         celery_result_backend=os.getenv("CELERY_RESULT_BACKEND", "redis://localhost:6379/1"),
         celery_task_always_eager=_as_bool(os.getenv("CELERY_TASK_ALWAYS_EAGER"), default=True),

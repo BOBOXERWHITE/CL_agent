@@ -1,11 +1,8 @@
 import { startTransition, useEffect, useState } from "react";
 
+import { type KnowledgeJob, listKnowledgeJobs, uploadKnowledgeDocument } from "../api/knowledge";
 import DocumentUploader from "../components/DocumentUploader";
-import {
-  type KnowledgeJob,
-  listKnowledgeJobs,
-  uploadKnowledgeDocument,
-} from "../api/knowledge";
+
 
 const STATUS_LABELS: Record<string, string> = {
   uploaded: "已上传",
@@ -61,8 +58,8 @@ export default function KnowledgePage() {
         <span className="panel__tag">DOCX / PDF</span>
       </div>
       <p className="panel__description">
-        上传制度文档后，系统会依次完成解析、切块、对象存储和向量入库。
-        你可以直接在这里观察每一份资料的状态变化。
+        上传制度文档后，系统会完成解析、切块、对象存储和向量写入。
+        你可以直接在这里观察每一份资料的处理状态与分块结果。
       </p>
       <DocumentUploader disabled={isSubmitting} onSubmit={handleUpload} />
       {errorMessage ? <p className="panel__error">{errorMessage}</p> : null}

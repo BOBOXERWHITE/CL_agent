@@ -3,6 +3,7 @@ import { FormEvent, useState } from "react";
 import { ChatAnswer, askPolicyQuestion } from "../api/chat";
 import CitationPanel from "../components/CitationPanel";
 import ConfidenceBadge from "../components/ConfidenceBadge";
+import RetrievalTraceDrawer from "../components/RetrievalTraceDrawer";
 
 
 export default function ChatPage() {
@@ -43,8 +44,8 @@ export default function ChatPage() {
         <span className="panel__tag">证据优先</span>
       </div>
       <p className="panel__description">
-        适合做政策核对、口径确认和制度问询。当前版本会优先展示引用依据和置信度，
-        方便你边提问边判断答案可靠性。
+        适合做政策核对、口径确认和制度问询。当前版本会展示引用依据、检索 Trace
+        和置信度，便于你边提问边判断结果是否可信。
       </p>
       <form className="question-form" onSubmit={(event) => void handleSubmit(event)}>
         <label htmlFor="policy-question">政策问题</label>
@@ -68,6 +69,7 @@ export default function ChatPage() {
           </div>
           <p className="answer-card__body">{chatAnswer.answer}</p>
           <CitationPanel citations={chatAnswer.citations} />
+          {chatAnswer.retrieval_trace ? <RetrievalTraceDrawer trace={chatAnswer.retrieval_trace} /> : null}
         </div>
       ) : null}
     </section>
