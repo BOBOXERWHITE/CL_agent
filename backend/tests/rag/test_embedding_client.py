@@ -40,6 +40,80 @@ def test_openai_compatible_embedding_client_parses_gateway_response() -> None:
     assert vectors == [[0.1, 0.2, 0.3, 0.4]]
 
 
+def test_openai_compatible_embedding_client_batches_large_requests() -> None:
+    requests: list[list[str]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(request.content.decode("utf-8"))
+        batch_inputs = payload["input"]
+        requests.append(batch_inputs)
+        data = []
+        for index, _ in enumerate(batch_inputs):
+            value = float(len(requests) * 10 + index)
+            data.append(
+                {
+                    "index": index,
+                    "embedding": [value, value + 0.1, value + 0.2, value + 0.3],
+                }
+            )
+        return httpx.Response(200, json={"data": data})
+
+    http_client = httpx.Client(transport=httpx.MockTransport(handler))
+    client = OpenAICompatibleEmbeddingClient(
+        base_url="https://gateway.example.com/v1",
+        api_key="test-key",
+        model_name="text-embedding-3-small",
+        http_client=http_client,
+        batch_size=2,
+    )
+
+    vectors = client.embed_texts(["A", "B", "C"], 4)
+
+    assert requests == [["A", "B"], ["C"]]
+    assert vectors == [
+        [10.0, 10.1, 10.2, 10.3],
+        [11.0, 11.1, 11.2, 11.3],
+        [20.0, 20.1, 20.2, 20.3],
+    ]
+
+
+def test_openai_compatible_embedding_client_retries_retryable_gateway_failure() -> None:
+    attempts = {"count": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        attempts["count"] += 1
+        if attempts["count"] == 1:
+            return httpx.Response(429, json={"error": {"message": "rate limited"}})
+
+        payload = json.loads(request.content.decode("utf-8"))
+        assert payload["input"] == ["鍖椾含閰掑簵鎶ラ攢涓婇檺"]
+        return httpx.Response(
+            200,
+            json={
+                "data": [
+                    {
+                        "index": 0,
+                        "embedding": [0.1, 0.2, 0.3, 0.4],
+                    }
+                ]
+            },
+        )
+
+    http_client = httpx.Client(transport=httpx.MockTransport(handler))
+    client = OpenAICompatibleEmbeddingClient(
+        base_url="https://gateway.example.com/v1",
+        api_key="test-key",
+        model_name="text-embedding-3-small",
+        http_client=http_client,
+        max_retries=1,
+    )
+
+    vectors = client.embed_texts(["鍖椾含閰掑簵鎶ラ攢涓婇檺"], 4)
+
+    assert attempts["count"] == 2
+    assert vectors == [[0.1, 0.2, 0.3, 0.4]]
+
+
 def test_build_vector_records_uses_embedding_client(monkeypatch) -> None:
     chunk = SimpleNamespace(
         id="chunk-1",

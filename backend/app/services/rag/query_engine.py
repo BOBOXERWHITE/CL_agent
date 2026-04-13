@@ -15,6 +15,7 @@ from app.services.rag.citation_service import CitationRecord, build_citations
 from app.services.rag.query_rewriter import rewrite_query
 from app.services.rag.rerankers import rerank_hits
 from app.services.rag.retrievers import RetrievalHit, retrieve_dense, retrieve_lexical
+from app.services.system_settings import get_effective_business_settings
 from app.services.rag.text_processing import extract_cjk_sequences
 
 
@@ -155,6 +156,7 @@ def _build_trace(
 def answer_policy_question(question: str, tenant_id: str, customer_id: str) -> PolicyAnswerResult:
     init_db()
     settings = get_settings()
+    business_settings = get_effective_business_settings()
     answer_client = get_policy_answer_client()
     client_model_name = getattr(answer_client, "model_name", settings.llm_model_name)
     with SessionLocal() as session:
@@ -163,13 +165,28 @@ def answer_policy_question(question: str, tenant_id: str, customer_id: str) -> P
     rewritten_query = rewrite_query(question)
     retrieval_started_at = perf_counter()
     retrieval_mode = "hybrid"
-    retrievals = _hybrid_search(rewritten_query.expanded_query, tenant_id, customer_id, settings.chat_top_k)
+    retrievals = _hybrid_search(
+        rewritten_query.expanded_query,
+        tenant_id,
+        customer_id,
+        business_settings.chat_top_k,
+    )
     if not retrievals:
         retrieval_mode = "vector"
-        retrievals = _vector_search(rewritten_query.expanded_query, tenant_id, customer_id, settings.chat_top_k)
+        retrievals = _vector_search(
+            rewritten_query.expanded_query,
+            tenant_id,
+            customer_id,
+            business_settings.chat_top_k,
+        )
     if not retrievals:
         retrieval_mode = "lexical"
-        retrievals = _lexical_search(rewritten_query.expanded_query, tenant_id, customer_id, settings.chat_top_k)
+        retrievals = _lexical_search(
+            rewritten_query.expanded_query,
+            tenant_id,
+            customer_id,
+            business_settings.chat_top_k,
+        )
     retrieval_elapsed_ms = int((perf_counter() - retrieval_started_at) * 1000)
 
     citations = build_citations(retrievals)
@@ -196,7 +213,7 @@ def answer_policy_question(question: str, tenant_id: str, customer_id: str) -> P
 
     evidence_snippets = [citation.snippet for citation in citations]
     top_score = max(0.0, min(citations[0].score, 1.0))
-    if top_score < settings.chat_confidence_threshold:
+    if top_score < business_settings.chat_confidence_threshold:
         low_confidence_answer = (
             "我找到了相关政策片段，但当前证据强度还不足以给出高置信回答。"
             if _is_chinese_query(question)

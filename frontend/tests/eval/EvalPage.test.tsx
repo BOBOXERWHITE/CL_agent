@@ -11,6 +11,29 @@ import * as promptsApi from "../../src/api/prompts";
 vi.mock("../../src/api/knowledge", () => ({
   listKnowledgeJobs: vi.fn().mockResolvedValue([]),
   uploadKnowledgeDocument: vi.fn(),
+  rebuildKnowledgeIndex: vi.fn(),
+  deleteKnowledgeDocument: vi.fn(),
+  checkKnowledgeEmbeddingReadiness: vi.fn().mockResolvedValue({
+    provider: "deterministic",
+    model_name: "deterministic-hash-embedding",
+    configured: true,
+    available: true,
+    status: "ready",
+    message: "当前使用本地 deterministic embedding，无需额外连通性检查。",
+    endpoint: null,
+  }),
+  runKnowledgeEmbeddingSmokeTest: vi.fn().mockResolvedValue({
+    provider: "deterministic",
+    model_name: "deterministic-hash-embedding",
+    configured: true,
+    available: true,
+    status: "ready",
+    message: "Embedding 烟雾测试通过。",
+    endpoint: null,
+    sample_text: "北京酒店报销上限",
+    latency_ms: 12.5,
+    vector_dimension: 16,
+  }),
 }));
 
 vi.mock("../../src/api/chat", () => ({
@@ -31,6 +54,71 @@ vi.mock("../../src/api/evals", () => ({
 vi.mock("../../src/api/agents", () => ({
   listAgentRuns: vi.fn().mockResolvedValue([]),
   createAgentRun: vi.fn(),
+}));
+
+vi.mock("../../src/api/reviews", () => ({
+  listReviewCases: vi.fn().mockResolvedValue([]),
+}));
+
+vi.mock("../../src/api/monitoring", () => ({
+  getMonitoringOverview: vi.fn().mockResolvedValue({
+    knowledge_summary: {
+      document_total: 0,
+      completed_total: 0,
+      failed_total: 0,
+      pending_reindex_total: 0,
+    },
+    chat_summary: {
+      session_total: 0,
+      message_total: 0,
+    },
+    review_summary: {
+      open_total: 0,
+    },
+    agent_summary: {
+      last_24h_total: 0,
+    },
+    eval_summary: {
+      last_24h_total: 0,
+    },
+    request_summary: {
+      last_hour_total: 0,
+      last_hour_error_total: 0,
+      last_hour_p95_latency_ms: 0,
+    },
+    recent_activity: {
+      recent_failed_requests: [],
+      recent_eval_runs: [],
+      recent_agent_runs: [],
+    },
+  }),
+}));
+
+vi.mock("../../src/api/logs", () => ({
+  listRuntimeLogs: vi.fn().mockResolvedValue([]),
+  getRuntimeLogDetail: vi.fn(),
+}));
+
+vi.mock("../../src/api/settings", () => ({
+  getSystemSettings: vi.fn().mockResolvedValue({
+    editable_settings: {
+      default_tenant_id: "演示租户",
+      default_customer_id: "演示客户",
+      chat_top_k: 3,
+      chat_confidence_threshold: 0.2,
+      default_eval_dataset: "zh-policy-smoke",
+    },
+    runtime_settings: {
+      llm_provider: "deterministic",
+      llm_model_name: "deterministic-policy-client",
+      embedding_provider: "deterministic",
+      embedding_model_name: "deterministic-hash-embedding",
+      embedding_dimension: 16,
+      vector_store_provider: "milvus",
+      auth_enabled: false,
+    },
+  }),
+  updateSystemSettings: vi.fn(),
 }));
 
 test("triggers eval run and renders metrics", async () => {
@@ -89,13 +177,14 @@ test("triggers eval run and renders metrics", async () => {
 
   render(<App />);
 
+  fireEvent.click(screen.getByRole("tab", { name: "评测运行" }));
   fireEvent.click(screen.getByRole("button", { name: "运行评测" }));
 
   await waitFor(() => {
     expect(screen.getByText("3 个问题")).toBeInTheDocument();
   });
 
-  expect(screen.getByText("评测运行")).toBeInTheDocument();
+  expect(screen.getByRole("heading", { name: "评测运行" })).toBeInTheDocument();
   expect(screen.getByText("答案正确率")).toBeInTheDocument();
   expect(screen.getByText("引用命中率")).toBeInTheDocument();
   expect(screen.getByText("低置信度占比")).toBeInTheDocument();

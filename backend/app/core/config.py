@@ -44,6 +44,8 @@ class Settings:
     embedding_api_base_url: str
     embedding_api_key: str
     embedding_dimension: int
+    embedding_batch_size: int
+    embedding_max_retries: int
     chunk_size: int
     chunk_overlap: int
     chat_top_k: int
@@ -96,6 +98,8 @@ def get_settings() -> Settings:
         embedding_api_base_url=os.getenv("EMBEDDING_API_BASE_URL", os.getenv("LLM_API_BASE_URL", "")).strip(),
         embedding_api_key=os.getenv("EMBEDDING_API_KEY", os.getenv("LLM_API_KEY", "")).strip(),
         embedding_dimension=int(os.getenv("EMBEDDING_DIMENSION", "16")),
+        embedding_batch_size=int(os.getenv("EMBEDDING_BATCH_SIZE", "16")),
+        embedding_max_retries=int(os.getenv("EMBEDDING_MAX_RETRIES", "2")),
         chunk_size=int(os.getenv("CHUNK_SIZE", "450")),
         chunk_overlap=int(os.getenv("CHUNK_OVERLAP", "1")),
         chat_top_k=int(os.getenv("CHAT_TOP_K", "3")),

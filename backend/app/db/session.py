@@ -60,7 +60,9 @@ def init_db() -> None:
     from app.db.models.knowledge import KnowledgeChunk, KnowledgeDocument
     from app.db.models.prompt_template import PromptTemplate
     from app.db.models.rag_recall_log import RagRecallLog
+    from app.db.models.runtime_log import RuntimeLog
     from app.db.models.rule import PolicyRule, ReviewCase
+    from app.db.models.system_setting import SystemSetting
 
     del (
         AgentRun,
@@ -73,7 +75,9 @@ def init_db() -> None:
         PolicyRule,
         PromptTemplate,
         RagRecallLog,
+        RuntimeLog,
         ReviewCase,
+        SystemSetting,
         ToolCallLog,
     )
     Base.metadata.create_all(bind=get_engine())

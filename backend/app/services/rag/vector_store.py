@@ -21,6 +21,9 @@ class NoopVectorStore:
         del query_text, tenant_id, customer_id, top_k
         return []
 
+    def delete(self, chunk_ids: list[str]) -> int:
+        return len(chunk_ids)
+
 
 class MilvusVectorStore:
     def __init__(self) -> None:
@@ -79,11 +82,26 @@ class MilvusVectorStore:
         )
         return collection
 
+    @staticmethod
+    def _escape_literal(value: str) -> str:
+        return value.replace("\\", "\\\\").replace('"', '\\"')
+
+    def _delete_existing(self, collection, chunk_ids: list[str]) -> None:
+        if not chunk_ids:
+            return
+
+        batch_size = 200
+        for start in range(0, len(chunk_ids), batch_size):
+            batch = chunk_ids[start : start + batch_size]
+            encoded = ", ".join(f'"{self._escape_literal(chunk_id)}"' for chunk_id in batch)
+            collection.delete(expr=f"chunk_id in [{encoded}]")
+
     def upsert(self, records: list[VectorRecord]) -> dict[str, str]:
         collection = self._ensure_collection()
         if not records:
             return {}
 
+        self._delete_existing(collection, [record.chunk_id for record in records])
         collection.insert(
             [
                 [record.chunk_id for record in records],
@@ -96,6 +114,17 @@ class MilvusVectorStore:
         collection.flush()
         return {record.chunk_id: record.chunk_id for record in records}
 
+    def delete(self, chunk_ids: list[str]) -> int:
+        if not chunk_ids:
+            return 0
+        if not self._utility.has_collection(self._collection_name, using="travel_ops"):
+            return 0
+
+        collection = self._collection_cls(self._collection_name, using="travel_ops")
+        self._delete_existing(collection, chunk_ids)
+        collection.flush()
+        return len(chunk_ids)
+
     def search(self, *, query_text: str, tenant_id: str, customer_id: str, top_k: int) -> list[tuple[str, float]]:
         if top_k <= 0:
             return []
@@ -106,8 +135,8 @@ class MilvusVectorStore:
         collection = self._collection_cls(self._collection_name, using="travel_ops")
         collection.load()
         query_vector = text_to_embedding(query_text, self._embedding_dimension)
-        safe_tenant = tenant_id.replace("\\", "\\\\").replace('"', '\\"')
-        safe_customer = customer_id.replace("\\", "\\\\").replace('"', '\\"')
+        safe_tenant = self._escape_literal(tenant_id)
+        safe_customer = self._escape_literal(customer_id)
         expr = f'tenant_id == "{safe_tenant}" and customer_id == "{safe_customer}"'
         search_result = collection.search(
             data=[query_vector],

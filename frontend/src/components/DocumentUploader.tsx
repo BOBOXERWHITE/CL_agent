@@ -1,8 +1,10 @@
-import { FormEvent, useState } from "react";
+import { FormEvent, useEffect, useState } from "react";
 
 
 interface DocumentUploaderProps {
   disabled?: boolean;
+  defaultTenantId?: string;
+  defaultCustomerId?: string;
   onSubmit: (input: {
     tenantId: string;
     customerId: string;
@@ -10,11 +12,24 @@ interface DocumentUploaderProps {
   }) => Promise<void>;
 }
 
-export default function DocumentUploader({ disabled = false, onSubmit }: DocumentUploaderProps) {
-  const [tenantId, setTenantId] = useState("演示租户");
-  const [customerId, setCustomerId] = useState("演示客户");
+export default function DocumentUploader({
+  disabled = false,
+  defaultTenantId = "演示租户",
+  defaultCustomerId = "演示客户",
+  onSubmit,
+}: DocumentUploaderProps) {
+  const [tenantId, setTenantId] = useState(defaultTenantId);
+  const [customerId, setCustomerId] = useState(defaultCustomerId);
   const [file, setFile] = useState<File | null>(null);
   const [errorMessage, setErrorMessage] = useState("");
+
+  useEffect(() => {
+    setTenantId(defaultTenantId);
+  }, [defaultTenantId]);
+
+  useEffect(() => {
+    setCustomerId(defaultCustomerId);
+  }, [defaultCustomerId]);
 
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();

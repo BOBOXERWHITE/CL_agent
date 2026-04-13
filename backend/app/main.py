@@ -11,13 +11,17 @@ from app.api.routes.chat import router as chat_router
 from app.api.routes.evals import router as evals_router
 from app.api.routes.health import router as health_router
 from app.api.routes.knowledge import router as knowledge_router
+from app.api.routes.monitoring import router as monitoring_router
 from app.api.routes.prompt_templates import router as prompt_templates_router
 from app.api.routes.reviews import router as reviews_router
+from app.api.routes.runtime_logs import router as runtime_logs_router
 from app.api.routes.rules import router as rules_router
+from app.api.routes.system_settings import router as system_settings_router
 from app.core.config import get_settings
 from app.core.logging import configure_logging
 from app.core.metrics import observe_request, observe_token_usage, render_metrics
 from app.db.session import init_db
+from app.services.runtime_logs import create_runtime_log
 
 
 def create_app() -> FastAPI:
@@ -50,6 +54,21 @@ def create_app() -> FastAPI:
             response = await call_next(request)
         except Exception:
             latency_ms = int((perf_counter() - started_at) * 1000)
+            error_message = "internal server error"
+            create_runtime_log(
+                request_id=request_id,
+                method=request.method,
+                path=request.url.path,
+                status_code=500,
+                latency_ms=latency_ms,
+                tenant_id=getattr(request.state, "tenant_id", None),
+                customer_id=getattr(request.state, "customer_id", None),
+                session_id=getattr(request.state, "session_id", None),
+                user_role=getattr(request.state, "user_role", None),
+                model_name=getattr(request.state, "model_name", None),
+                token_usage=getattr(request.state, "token_usage", None),
+                error_message=error_message,
+            )
             request_logger.exception(
                 "request_failed",
                 extra={
@@ -63,12 +82,26 @@ def create_app() -> FastAPI:
                     "latency_ms": latency_ms,
                     "model_name": getattr(request.state, "model_name", None),
                     "token_usage": getattr(request.state, "token_usage", None),
+                    "error_message": error_message,
                 },
             )
             raise
 
         latency_ms = int((perf_counter() - started_at) * 1000)
         response.headers["X-Request-ID"] = request_id
+        create_runtime_log(
+            request_id=request_id,
+            method=request.method,
+            path=request.url.path,
+            status_code=response.status_code,
+            latency_ms=latency_ms,
+            tenant_id=getattr(request.state, "tenant_id", None),
+            customer_id=getattr(request.state, "customer_id", None),
+            session_id=getattr(request.state, "session_id", None),
+            user_role=getattr(request.state, "user_role", None),
+            model_name=getattr(request.state, "model_name", None),
+            token_usage=getattr(request.state, "token_usage", None),
+        )
         observe_request(request.method, request.url.path, response.status_code, latency_ms)
         observe_token_usage(
             getattr(request.state, "model_name", None),
@@ -100,6 +133,9 @@ def create_app() -> FastAPI:
     app.include_router(agents_router)
     app.include_router(rules_router)
     app.include_router(reviews_router)
+    app.include_router(system_settings_router)
+    app.include_router(runtime_logs_router)
+    app.include_router(monitoring_router)
     return app
 
 

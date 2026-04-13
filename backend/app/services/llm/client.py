@@ -129,7 +129,7 @@ class OpenAICompatiblePolicyAnswerClient:
         usage = payload.get("usage", {})
         return AnswerDraft(
             answer=answer,
-            confidence=max(confidence, 0.78),
+            confidence=confidence,
             model_name=str(payload.get("model", self.model_name)),
             token_usage={
                 "input_tokens": int(usage.get("prompt_tokens", 0)),

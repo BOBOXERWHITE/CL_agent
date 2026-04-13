@@ -6,6 +6,7 @@ from pathlib import Path
 from uuid import uuid4
 
 from minio import Minio
+from minio.error import S3Error
 
 from app.core.config import get_settings
 
@@ -31,6 +32,11 @@ class LocalObjectStorage:
 
     def read(self, storage_key: str) -> bytes:
         return (self.root / storage_key).read_bytes()
+
+    def delete(self, storage_key: str) -> None:
+        target = self.root / storage_key
+        if target.exists():
+            target.unlink()
 
 
 class MinioObjectStorage:
@@ -74,6 +80,13 @@ class MinioObjectStorage:
         finally:
             response.close()
             response.release_conn()
+
+    def delete(self, storage_key: str) -> None:
+        try:
+            self.client.remove_object(self.bucket_name, storage_key)
+        except S3Error as exc:
+            if exc.code not in {"NoSuchKey", "NoSuchObject"}:
+                raise
 
 
 def get_object_storage() -> LocalObjectStorage | MinioObjectStorage:

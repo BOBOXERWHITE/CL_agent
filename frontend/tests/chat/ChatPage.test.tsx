@@ -1,38 +1,14 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { vi } from "vitest";
 
-import App from "../../src/app/App";
 import * as chatApi from "../../src/api/chat";
-import * as knowledgeApi from "../../src/api/knowledge";
-
-
-vi.mock("../../src/api/knowledge", () => ({
-  listKnowledgeJobs: vi.fn().mockResolvedValue([]),
-  uploadKnowledgeDocument: vi.fn(),
-}));
+import ChatPage from "../../src/pages/ChatPage";
 
 vi.mock("../../src/api/chat", () => ({
   askPolicyQuestion: vi.fn(),
 }));
 
-vi.mock("../../src/api/prompts", () => ({
-  createPromptTemplate: vi.fn(),
-  listPromptTemplates: vi.fn().mockResolvedValue([]),
-  activatePromptTemplate: vi.fn(),
-}));
-
-vi.mock("../../src/api/evals", () => ({
-  listEvalRuns: vi.fn().mockResolvedValue([]),
-  triggerEvalRun: vi.fn(),
-}));
-
-vi.mock("../../src/api/agents", () => ({
-  listAgentRuns: vi.fn().mockResolvedValue([]),
-  createAgentRun: vi.fn(),
-}));
-
-test("renders policy answer with citations and confidence", async () => {
-  vi.mocked(knowledgeApi.listKnowledgeJobs).mockResolvedValue([]);
+test("submits tenant and customer ids with the policy question", async () => {
   vi.mocked(chatApi.askPolicyQuestion).mockResolvedValue({
     session_id: "session-1",
     answer: "根据当前政策证据，国内出差应优先预订 economy class。",
@@ -66,8 +42,14 @@ test("renders policy answer with citations and confidence", async () => {
     },
   });
 
-  render(<App />);
+  render(<ChatPage />);
 
+  fireEvent.change(screen.getByLabelText("租户 ID"), {
+    target: { value: "演示租户" },
+  });
+  fireEvent.change(screen.getByLabelText("客户 ID"), {
+    target: { value: "演示客户" },
+  });
   fireEvent.change(screen.getByLabelText("政策问题"), {
     target: { value: "我可以预订 business class 吗？" },
   });
@@ -77,6 +59,12 @@ test("renders policy answer with citations and confidence", async () => {
     expect(screen.getByText(/国内出差应优先预订 economy class/i)).toBeInTheDocument();
   });
 
+  expect(chatApi.askPolicyQuestion).toHaveBeenCalledWith({
+    question: "我可以预订 business class 吗？",
+    tenantId: "演示租户",
+    customerId: "演示客户",
+    sessionId: undefined,
+  });
   expect(screen.getByText("置信度 92%")).toBeInTheDocument();
   expect(screen.getByText("差旅政策")).toBeInTheDocument();
   expect(screen.getByText("引用依据")).toBeInTheDocument();

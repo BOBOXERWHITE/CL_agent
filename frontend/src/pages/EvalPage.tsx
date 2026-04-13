@@ -70,7 +70,11 @@ function statusText(value: boolean, trueLabel: string, falseLabel: string): stri
   return value ? trueLabel : falseLabel;
 }
 
-export default function EvalPage() {
+interface EvalPageProps {
+  defaultDatasetName?: string;
+}
+
+export default function EvalPage({ defaultDatasetName = "zh-policy-smoke" }: EvalPageProps) {
   const [runs, setRuns] = useState<EvalRun[]>([]);
   const [errorMessage, setErrorMessage] = useState("");
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -94,7 +98,7 @@ export default function EvalPage() {
     setIsSubmitting(true);
     setErrorMessage("");
     try {
-      await triggerEvalRun({ datasetName: "zh-policy-smoke" });
+      await triggerEvalRun({ datasetName: defaultDatasetName });
       await loadRuns();
     } catch (error: unknown) {
       setErrorMessage(error instanceof Error ? error.message : "评测运行失败。");
@@ -134,7 +138,7 @@ export default function EvalPage() {
           <p className="panel__eyebrow">离线评测</p>
           <h2>评测运行</h2>
         </div>
-        <span className="panel__tag">zh-policy-smoke</span>
+        <span className="panel__tag">{defaultDatasetName}</span>
       </div>
       <p className="panel__description">
         先跑最小中文冒烟集，确认答案正确率、引用命中率和低置信度占比没有回退。
@@ -143,7 +147,7 @@ export default function EvalPage() {
         <button type="button" onClick={() => void handleRunEval()} disabled={isSubmitting}>
           运行评测
         </button>
-        <p>当前评测集固定为 zh-policy-smoke，后续再扩成更完整的中文回归集。</p>
+        <p>当前默认评测集为 {defaultDatasetName}，后续再扩成更完整的中文回归集。</p>
       </div>
       {errorMessage ? <p className="panel__error">{errorMessage}</p> : null}
       <div className="eval-grid">

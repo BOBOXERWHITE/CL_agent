@@ -12,6 +12,7 @@ from app.db.models.rag_recall_log import RagRecallLog
 from app.db.session import get_session, init_db
 from app.schemas.chat import ChatAskRequest, ChatAskResponse, CitationPayload, RetrievalTracePayload
 from app.services.rag.query_engine import answer_policy_question
+from app.services.system_settings import get_effective_business_settings
 
 
 router = APIRouter(prefix="/api/chat", tags=["chat"])
@@ -26,13 +27,16 @@ def ask_policy_question(
     session: Session = Depends(get_session),
 ) -> ChatAskResponse:
     init_db()
+    business_settings = get_effective_business_settings()
     request.state.request_id = context.request_id
-    request.state.tenant_id = payload.tenant_id
-    request.state.customer_id = payload.customer_id
+    tenant_id = payload.tenant_id or business_settings.default_tenant_id
+    customer_id = payload.customer_id or business_settings.default_customer_id
+    request.state.tenant_id = tenant_id
+    request.state.customer_id = customer_id
     result = answer_policy_question(
         question=payload.question,
-        tenant_id=payload.tenant_id,
-        customer_id=payload.customer_id,
+        tenant_id=tenant_id,
+        customer_id=customer_id,
     )
     request.state.model_name = result.retrieval_trace.model_name
     request.state.token_usage = result.retrieval_trace.token_usage
@@ -43,8 +47,8 @@ def ask_policy_question(
     if chat_session is None:
         chat_session = ChatSession(
             id=session_id,
-            tenant_id=payload.tenant_id,
-            customer_id=payload.customer_id,
+            tenant_id=tenant_id,
+            customer_id=customer_id,
         )
         session.add(chat_session)
 
@@ -75,8 +79,8 @@ def ask_policy_question(
             id=str(uuid4()),
             request_id=context.request_id,
             session_id=session_id,
-            tenant_id=payload.tenant_id,
-            customer_id=payload.customer_id,
+            tenant_id=tenant_id,
+            customer_id=customer_id,
             question=payload.question,
             retrieval_mode=result.retrieval_trace.mode,
             prompt_template_id=result.prompt_template_id,

@@ -101,6 +101,8 @@ docker compose down
 - `EMBEDDING_API_BASE_URL`：embedding 网关地址；留空时会回退到 `LLM_API_BASE_URL`
 - `EMBEDDING_API_KEY`：embedding 网关密钥；留空时会回退到 `LLM_API_KEY`
 - `EMBEDDING_DIMENSION`：向量维度，使用真实 embedding 时必须与模型输出维度一致
+- `EMBEDDING_BATCH_SIZE`：OpenAI-compatible embedding 单次批量大小，默认 `16`
+- `EMBEDDING_MAX_RETRIES`：OpenAI-compatible embedding 在 `429 / 5xx / 网络异常` 下的最大重试次数，默认 `2`
 
 ### 前端
 
@@ -150,6 +152,61 @@ cd frontend
 npm run dev
 ```
 
+## 后台控制台与运维面板
+
+前端现在已经重构为顶部标签式后台控制台，默认包含 9 个入口：
+
+- `知识库管理`
+- `政策问答`
+- `Prompt 模板`
+- `评测运行`
+- `Agent 运行`
+- `人工复核`
+- `监控面板`
+- `运行日志`
+- `系统设置`
+
+其中新增的 3 个运维面板职责如下：
+
+- `监控面板`：聚合知识库、问答、评测、Agent、人工复核和近 1 小时请求指标，不直接解析 `/metrics`
+- `运行日志`：按请求路径、状态码、请求 ID、租户、会话和时间范围查询 `runtime_log`
+- `系统设置`：维护业务默认值，并把数据库配置即时覆盖到问答与前端默认参数
+
+### 权限说明
+
+- `系统设置`：仅 `admin` 可读写
+- `监控面板`：`admin`、`operator` 可读
+- `运行日志`：`admin`、`operator` 可读
+
+### 相关接口
+
+- `GET /api/settings/system`
+- `PUT /api/settings/system`
+- `GET /api/monitoring/overview`
+- `GET /api/logs/runtime`
+- `GET /api/logs/runtime/{id}`
+
+### 配置生效规则
+
+- 系统设置面板当前可编辑的业务项只有：
+  - `default_tenant_id`
+  - `default_customer_id`
+  - `chat_top_k`
+  - `chat_confidence_threshold`
+  - `default_eval_dataset`
+- 这些值优先级高于 `.env` 中的默认值，保存后无需重启即可影响：
+  - 问答页默认租户 / 客户
+  - 知识入库页默认租户 / 客户
+  - 问答链路的 `top_k`
+  - 问答低置信度阈值
+  - 评测页默认评测集
+- 基础设施配置仍然只从 `.env` 读取，不会出现在页面中：
+  - `LLM_*`
+  - `EMBEDDING_*`
+  - `MILVUS_*`
+  - `MINIO_*`
+  - `AUTH_*`
+
 ## 当前可验证能力
 
 ### Task 2：知识入库
@@ -157,6 +214,23 @@ npm run dev
 - 上传接口会写入 `PostgreSQL` 文档记录
 - 原始文件会写入 `MinIO`
 - 切块向量会写入 `Milvus`
+- 新增知识库向量重建能力：
+  - `POST /api/knowledge/reindex`
+  - 可在切换真实 embedding 后，对现有知识库执行全量向量重建而不必重新上传文档
+- `GET /api/knowledge/jobs` 现在会返回：
+  - 文档已写入的向量配置
+  - 当前运行中的向量配置
+  - `requires_reindex` 标记，帮助识别切模型后需要重建的文档
+- 新增 `GET /api/knowledge/embedding-readiness`，用于检查当前 embedding 网关配置与连通性
+- 新增 `POST /api/knowledge/embedding-smoke-test`，用于执行一次真实 embedding 请求并返回向量维度与耗时
+- 新增 `DELETE /api/knowledge/documents/{document_id}`，用于同步删除 PostgreSQL、对象存储和向量库中的单份文档数据
+- 前端知识入库面板支持单文档 `重建此文档`
+- 前端知识入库面板支持：
+  - `检查模型网关`
+  - `执行真实向量测试`
+  - `重建待重建文档`
+  - `重建此文档`
+  - `删除此文档`
 
 ### Task 3：政策问答
 
@@ -229,21 +303,40 @@ npm run dev
   - `openai-compatible` embedding 网关
 - 即使未配置真实网关，也不会破坏当前本地开发和测试链路
 
+### 后续迭代：后台控制台与运维面板重构
+
+- 前端已从纵向堆叠工作台重构为顶部标签式后台壳层
+- 系统设置已落库到 `system_setting`，并通过“环境变量默认值 + PostgreSQL 覆盖值”形成 effective settings
+- 请求级运行日志已落库到 `runtime_log`，stdout JSON 日志继续保留
+- 监控概览通过业务表聚合输出，不直接把 Prometheus 原始文本暴露给页面
+- 新增页面：
+  - `监控面板`
+  - `运行日志`
+  - `系统设置`
+
 ## 建议验证顺序
 
 1. 上传一份 `DOCX / PDF`
 2. 在前端确认任务状态变成 `已完成`
-3. 到 PostgreSQL 查看 `knowledge_document` 和 `knowledge_chunk`
-4. 提一个中文问题，例如 `北京酒店报销上限是多少？`
-5. 确认返回答案、引用依据、置信度和 `检索 Trace`
-6. 点击 `运行评测`，确认页面出现最新评测记录
-7. 在 `Agent 运行记录` 面板执行一条示例工单，确认页面出现队列、时间线、规则判定和工具调用记录
-8. 在 `人工复核队列` 面板确认刚才的工单已经进入队列，并能看到规则命中详情与建议动作
-9. 将 `.env` 里的 `AUTH_ENABLED=true`，并给 `frontend/.env` 配置 `VITE_API_TOKEN`，确认：
+3. 如已切换新的 embedding 配置，先点击 `检查模型网关`
+4. 再点击 `执行真实向量测试`，确认能看到真实请求返回的向量维度和耗时
+5. 确认任务看板里需要重建的文档显示 `待重建`
+6. 点击 `重建此文档`、`重建待重建文档` 或 `重建向量索引`
+7. 到 PostgreSQL 查看 `knowledge_document` 和 `knowledge_chunk`
+8. 点击 `删除此文档`，确认页面提示删除成功，且列表、数据库和对象存储中的该文档记录被清理
+9. 提一个中文问题，例如 `北京酒店报销上限是多少？`
+10. 确认返回答案、引用依据、置信度和 `检索 Trace`
+11. 点击 `运行评测`，确认页面出现最新评测记录
+12. 在 `Agent 运行记录` 面板执行一条示例工单，确认页面出现队列、时间线、规则判定和工具调用记录
+13. 在 `人工复核队列` 面板确认刚才的工单已经进入队列，并能看到规则命中详情与建议动作
+14. 进入 `系统设置` 面板，用 `admin` Token 修改默认租户、默认客户和问答阈值，刷新后确认知识库页、问答页和评测页默认值已经同步变化
+15. 进入 `运行日志` 面板，确认刚才的上传、问答、评测和 Agent 请求都能按路径、请求 ID 和时间范围筛出来
+16. 进入 `监控面板`，确认知识库、问答、评测、Agent 和失败请求的聚合数字发生对应变化
+17. 将 `.env` 里的 `AUTH_ENABLED=true`，并给 `frontend/.env` 配置 `VITE_API_TOKEN`，确认：
    - `admin` Token 可以创建 Prompt
    - `operator` Token 创建 Prompt 返回 `403`
    - `reviewer` Token 可以查看 `人工复核队列`
-10. 打开 `http://localhost:8000/metrics`，确认 Prometheus 文本指标可访问
+18. 打开 `http://localhost:8000/metrics`，确认 Prometheus 文本指标可访问
 
 ## 真实模型网关验证
 
@@ -260,12 +353,17 @@ EMBEDDING_MODEL_NAME=text-embedding-3-small
 EMBEDDING_API_BASE_URL=https://your-gateway.example.com/v1
 EMBEDDING_API_KEY=your-key
 EMBEDDING_DIMENSION=1536
+EMBEDDING_BATCH_SIZE=16
+EMBEDDING_MAX_RETRIES=2
 ```
 
 然后重新启动后端，再做两件事：
 
-1. 上传一份新文档，让知识块按真实 embedding 重建
-2. 重新提问并查看 `retrieval_trace.model_name` 是否已经变成真实模型名
+1. 在知识入库面板先点击 `检查模型网关`
+2. 再点击 `执行真实向量测试`，确认返回的 `向量维度` 与 `EMBEDDING_DIMENSION` 一致
+3. 上传一份新文档，或对显示 `待重建` 的文档点击 `重建此文档` / `重建待重建文档`
+4. 重新提问并查看 `retrieval_trace.model_name` 是否已经变成真实模型名
+5. 如果 embedding 网关容易限流，先保持默认 `EMBEDDING_BATCH_SIZE=16` 和 `EMBEDDING_MAX_RETRIES=2`，再根据网关限制调整批量大小和重试次数
 
 ## 部署验证
 
@@ -308,3 +406,9 @@ cd frontend && npm run build
 ## 文档同步约定
 
 所有影响本地开发、部署、依赖接入、环境变量、端口或第三方服务连接方式的变更，都必须在同一次改动里同步更新 `README.md`。详细规则见 `docs/development-rules.md`。
+
+## 问答检索隔离说明
+
+- 政策问答页面现在支持填写 `租户 ID` 和 `客户 ID`
+- 这两个值必须与知识入库时使用的值保持一致，否则检索会因为隔离条件不匹配而返回空证据
+- 如果页面提示“当前没有检索到足够的政策证据”，先核对问答页和入库页的 `租户 ID / 客户 ID` 是否一致

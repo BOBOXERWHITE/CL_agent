@@ -857,6 +857,107 @@ git add backend/app/core/config.py backend/app/services/llm/client.py backend/ap
 git commit -m "feat: add model gateway with deterministic fallback"
 ```
 
+### 后续迭代任务：后台控制台与运维面板重构
+
+**范围：**
+
+- 顶部标签壳层
+- 知识库管理重组
+- 监控面板
+- 运行日志
+- 系统设置
+
+**明确不做：**
+
+- `.env` 与密钥在线编辑
+- Prometheus 原始文本解析式前端
+- Alembic 迁移框架引入
+- 多页面路由化重构
+
+**后端改造要点：**
+
+- 新增 `system_setting` 表，使用 `key + value_json` 持久化业务默认值。
+- 新增 settings service，形成“环境变量默认值 + PostgreSQL 覆盖值”的 effective settings。
+- 新增接口：
+  - `GET /api/settings/system`
+  - `PUT /api/settings/system`
+- 可编辑字段固定为：
+  - `default_tenant_id`
+  - `default_customer_id`
+  - `chat_top_k`
+  - `chat_confidence_threshold`
+  - `default_eval_dataset`
+- 只读运行配置固定展示：
+  - `llm_provider`
+  - `llm_model_name`
+  - `embedding_provider`
+  - `embedding_model_name`
+  - `embedding_dimension`
+  - `vector_store_provider`
+  - `auth_enabled`
+- 新增 `runtime_log` 表，持久化请求级运行日志。
+- 在请求中间件中把成功请求与异常请求都写入 `runtime_log`，并保留 stdout JSON 日志。
+- 新增接口：
+  - `GET /api/logs/runtime`
+  - `GET /api/logs/runtime/{id}`
+- 日志筛选参数固定支持：
+  - `path`
+  - `status_code`
+  - `request_id`
+  - `tenant_id`
+  - `session_id`
+  - `date_from`
+  - `date_to`
+  - `limit`
+- 新增 `GET /api/monitoring/overview`，聚合输出：
+  - `knowledge_summary`
+  - `chat_summary`
+  - `review_summary`
+  - `agent_summary`
+  - `eval_summary`
+  - `request_summary`
+  - `recent_activity`
+- 把问答链路中的 `chat_top_k` 和 `chat_confidence_threshold` 改为优先读取 effective settings。
+
+**前端改造要点：**
+
+- 将 `App.tsx` 重构为顶部标签式后台壳层，不引入 `react-router`。
+- 标签顺序固定为：
+  - `知识库管理`
+  - `政策问答`
+  - `Prompt 模板`
+  - `评测运行`
+  - `Agent 运行`
+  - `人工复核`
+  - `监控面板`
+  - `运行日志`
+  - `系统设置`
+- 新增 API 封装：
+  - `monitoring.ts`
+  - `logs.ts`
+  - `settings.ts`
+- 新增页面：
+  - `MonitoringPage`
+  - `RuntimeLogsPage`
+  - `SystemSettingsPage`
+- 知识库页增加顶部摘要卡，展示文档总数、待重建文档和当前向量状态。
+- 前端默认租户、客户和默认评测集改为通过系统设置接口加载。
+
+**权限规则：**
+
+- `系统设置`：仅 `admin` 可读写
+- `监控面板`：`admin`、`operator` 可读
+- `运行日志`：`admin`、`operator` 可读
+
+**验收标准：**
+
+- 顶部标签切换正常，默认进入 `知识库管理`
+- 管理员修改默认租户、客户和检索阈值后，知识库、问答和评测页默认值即时更新
+- 上传文档、发起问答、执行评测、运行 Agent 后，监控面板与运行日志能看到对应变化
+- `operator` 能看监控与日志，但不能修改系统设置
+- 原有知识库、问答、Prompt、评测、Agent、人工复核能力不回退
+- 前端构建与后端测试全通过
+
 ## 明确延后处理的事项
 
 - 初期不要上微服务。
