@@ -132,6 +132,13 @@ test("triggers eval run and renders metrics", async () => {
       answer_correctness: 1,
       citation_hit_rate: 1,
       low_confidence_rate: 0,
+      provider_snapshot: {
+        llm_provider: "openai-compatible",
+        llm_model_name: "gpt-4o-mini",
+        embedding_provider: "openai-compatible",
+        embedding_model_name: "text-embedding-3-small",
+        vector_store_provider: "milvus",
+      },
     },
     details: [
       {
@@ -188,6 +195,9 @@ test("triggers eval run and renders metrics", async () => {
   expect(screen.getByText("答案正确率")).toBeInTheDocument();
   expect(screen.getByText("引用命中率")).toBeInTheDocument();
   expect(screen.getByText("低置信度占比")).toBeInTheDocument();
+  expect(screen.getByText("本次评测配置")).toBeInTheDocument();
+  expect(screen.getAllByText("gpt-4o-mini").length).toBeGreaterThan(0);
+  expect(screen.getAllByText("text-embedding-3-small").length).toBeGreaterThan(0);
   fireEvent.click(screen.getByRole("button", { name: "查看明细" }));
   await waitFor(() => {
     expect(screen.getByRole("button", { name: "仅看失败项" })).toBeInTheDocument();

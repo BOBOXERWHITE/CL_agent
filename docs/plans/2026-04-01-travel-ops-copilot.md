@@ -992,6 +992,159 @@ git commit -m "feat: add model gateway with deterministic fallback"
 
 **2. 单独开实现会话**：在新会话中按这份计划分阶段执行，并在关键节点做 review。
 
+## 任务 10：真实模型联调收口与检索链生产化升级
+
+### 本轮目标
+
+- 把 `LLM / Embedding` 从“支持 OpenAI-compatible provider”推进到“支持页面内可验证的真实网关联调”。
+- 把检索链从原型级实现推进到更接近生产可用的结构，优先解决重复改写、无效全量扫描和评测可追溯性不足的问题。
+
+### 本轮已实现
+
+#### 10.1 真实 LLM 网关联调能力
+
+- 新增 `GET /api/chat/llm-readiness`，用于检查模型网关是否可达、配置是否齐全、目标模型是否出现在 `/models` 列表中。
+- 新增 `POST /api/chat/llm-smoke-test`，直接执行一次真实聊天生成请求，返回：
+  - `answer_preview`
+  - `latency_ms`
+  - `token_usage`
+  - `endpoint`
+- 前端 `系统设置` 页面新增：
+  - `检查 LLM 网关`
+  - `执行 LLM 烟雾测试`
+- 当 `LLM_PROVIDER=openai-compatible` 但缺少地址或密钥时，仍然保持 deterministic 回退，不破坏本地开发链路。
+
+#### 10.2 Embedding 网关联调闭环
+
+- 保留并复用：
+  - `GET /api/knowledge/embedding-readiness`
+  - `POST /api/knowledge/embedding-smoke-test`
+- 前端 `系统设置` 页面同步集成：
+  - `检查 Embedding 网关`
+  - `执行 Embedding 烟雾测试`
+- 这样真实模型联调不再分散在多个页面，管理员可以在一个入口完成模型连通性检查。
+
+#### 10.3 检索链生产化升级
+
+- `query_engine` 入口只做一次 Query Rewrite，避免每个 retriever 内重复扩词。
+- `dense retrieval` 改为按 Milvus 返回的 `chunk_id` 定向回表，只加载命中的 PostgreSQL rows。
+- `lexical retrieval` 改为先做数据库候选筛选，再在 Python 层计算更细打分，降低租户内全量扫描成本。
+- 保留现有 `hybrid retrieval -> rerank -> citation` 主链，不破坏原有 API 契约。
+
+#### 10.4 质量验证链路升级
+
+- `eval_run.metrics` 新增 `provider_snapshot`，记录：
+  - `llm_provider`
+  - `llm_model_name`
+  - `embedding_provider`
+  - `embedding_model_name`
+  - `vector_store_provider`
+- 前端 `评测运行` 页面新增 `本次评测配置` 面板，后续做真实模型回归时可以直接看到这次评测到底跑在什么配置上。
+
+### 本轮验证结果
+
+- `pytest -q backend/tests`：通过
+- `cd frontend && npm test`：通过
+- `cd frontend && npm run build`：通过
+
+### 当前边界
+
+- 本轮完成的是“真实网关接入能力、页面联调入口和评测追踪能力”，不是“真实模型效果达标”本身。
+- 如果没有填写真实 `LLM_* / EMBEDDING_*`，系统仍会回退到本地 deterministic provider。
+- 是否达到企业级检索质量，仍需在真实知识库和真实网关上重新跑中文评测与人工验收。
+
+### 下一步建议
+
+1. 在 `.env` 中配置真实 `LLM_*` 与 `EMBEDDING_*`。
+2. 通过 `系统设置` 页面完成四项联调动作：
+   - `检查 LLM 网关`
+   - `执行 LLM 烟雾测试`
+   - `检查 Embedding 网关`
+   - `执行 Embedding 烟雾测试`
+3. 回到 `知识库管理` 页面，重建 `待重建` 文档。
+4. 在 `评测运行` 页面重新跑中文评测，并根据 `本次评测配置` 与失败明细判断是否进入下一轮检索质量优化。
+
+## 任务 11：企业化检索、召回与评测强化（第一轮）
+
+### 本轮目标
+
+- 把当前检索主链路从“可运行”推进到“更接近企业生产”的可调优结构，优先解决融合策略粗糙、重复文档挤占上下文和召回排序不可评估的问题。
+- 把真实网关联调从“依赖 `/models` 成功”推进到“基于真实请求探活”的方式，兼容方舟、百炼这类 OpenAI-compatible 但能力面不完全一致的网关。
+- 把评测从“只看是否命中”推进到“看召回排序、看是否达标、看是否放行”的企业评估口径。
+
+### 本轮改造范围
+
+#### 11.1 架构层
+
+- 保持模块化单体不变，不新增微服务拆分。
+- 新增一份“企业检索链 ADR”，明确：
+  - 为什么保留 `PostgreSQL + Milvus`
+  - 为什么在当前阶段采用 `RRF + rerank + 文档多样性约束`
+  - 为什么质量门槛以离线评测和人工验收共同裁决
+
+#### 11.2 检索策略
+
+- 将 `hybrid retrieval` 的融合方式从“按 chunk 取更高分数”升级为 `RRF`。
+- 在融合后增加文档多样性约束，避免同一文档的多个 chunk 挤占全部证据窗口。
+- 保留 `dense + lexical + rerank` 三段式结构，但让排序更稳定、可解释。
+- 为检索链引入显式可配置参数：
+  - `RAG_RRF_K`
+  - `RAG_MAX_CHUNKS_PER_DOCUMENT`
+  - `RAG_DENSE_CANDIDATE_MULTIPLIER`
+  - `RAG_LEXICAL_CANDIDATE_MULTIPLIER`
+
+#### 11.3 召回策略
+
+- `dense retrieval` 继续按 `chunk_id` 定向回表，但扩大候选数后再融合。
+- `lexical retrieval` 保留数据库候选筛选，再在 Python 层精算分数。
+- `query rewrite` 继续只在入口执行一次，不在 retriever 内重复扩写。
+- 在 `retrieval_trace` 中补充更多可诊断信息：
+  - 原始问题
+  - 扩写后问题
+  - 命中的 rewrite 规则
+  - 候选数量与最终入选数量
+
+#### 11.4 模型网关联调
+
+- `LLM readiness` 不再只依赖 `/models`，当模型列表接口不兼容时，允许回退到一次最小真实推理探活。
+- `Embedding readiness` 不再只依赖 `/models`，改为优先验证 `/embeddings` 真正可用。
+- `Embedding` 请求补充可配置参数，支持：
+  - `dimensions`
+  - `encoding_format`
+- 这样可以兼容百炼 `text-embedding-v4` 这类需要指定维度的模型。
+- 对供应商约束做显式兼容处理，例如 DashScope / 百炼 `text-embedding-v4` 的 embedding 单次批量上限为 `10`，避免知识库重建因默认批量过大直接失败。
+
+#### 11.5 评估标准
+
+- 在现有指标基础上新增：
+  - `retrieval_mrr`
+  - `retrieval_hit_rate`
+  - `answer_pass_rate`
+  - `quality_gate`
+  - `quality_gate_reasons`
+- `quality_gate` 至少区分：
+  - `pass`
+  - `warn`
+  - `fail`
+- 评估时不只看“答没答出来”，还要看：
+  - 证据排序是否足够靠前
+  - 低置信度占比是否过高
+  - 在当前模型/向量配置下是否满足放行门槛
+
+### 本轮明确不做
+
+- 不引入 Elasticsearch / OpenSearch 作为第二检索引擎。
+- 不引入复杂 Query Planner、多跳检索或完整 Graph RAG。
+- 不在这一轮内完成所有企业生产要求，只完成“企业化第一轮收口”。
+
+### 本轮验收标准
+
+- 真实 LLM readiness 在 `/models` 不可用时仍可完成探活。
+- 真实 embedding readiness 能验证向量接口可用性，并支持显式维度参数。
+- `hybrid retrieval` 使用 RRF 融合并通过回归测试。
+- 评测结果能够返回 `quality_gate` 与排序类指标。
+- 迭代文档、README 和实现保持一致。
+
 
 
 

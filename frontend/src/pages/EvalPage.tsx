@@ -9,24 +9,14 @@ import {
 } from "../utils/evalDetails";
 import { summarizeEvalDetails } from "../utils/evalSummary";
 
-
 const STATUS_LABELS: Record<string, string> = {
   completed: "已完成",
 };
 
 const METRIC_LABELS = [
-  {
-    key: "answer_correctness",
-    label: "答案正确率",
-  },
-  {
-    key: "citation_hit_rate",
-    label: "引用命中率",
-  },
-  {
-    key: "low_confidence_rate",
-    label: "低置信度占比",
-  },
+  { key: "answer_correctness", label: "答案正确率" },
+  { key: "citation_hit_rate", label: "引用命中率" },
+  { key: "low_confidence_rate", label: "低置信度占比" },
 ] as const;
 
 const DETAIL_FILTER_LABELS: Record<EvalDetailFilter, string> = {
@@ -36,26 +26,11 @@ const DETAIL_FILTER_LABELS: Record<EvalDetailFilter, string> = {
 };
 
 const SUMMARY_METRICS = [
-  {
-    key: "failedCount",
-    label: "失败题数",
-  },
-  {
-    key: "answerIncorrectCount",
-    label: "答案未命中",
-  },
-  {
-    key: "citationMissCount",
-    label: "引用未命中",
-  },
-  {
-    key: "lowConfidenceCount",
-    label: "低置信度",
-  },
-  {
-    key: "emptyCitationCount",
-    label: "无引用返回",
-  },
+  { key: "failedCount", label: "失败题数" },
+  { key: "answerIncorrectCount", label: "答案未命中" },
+  { key: "citationMissCount", label: "引用未命中" },
+  { key: "lowConfidenceCount", label: "低置信度" },
+  { key: "emptyCitationCount", label: "无引用返回" },
 ] as const;
 
 function formatPercent(value: number): string {
@@ -124,11 +99,7 @@ export default function EvalPage({ defaultDatasetName = "zh-policy-smoke" }: Eva
     const filter = detailFilters[run.id] ?? "all";
     const details = filterEvalDetails(run.details, filter);
     const csv = buildEvalDetailsCsv(details, DETAIL_FILTER_LABELS[filter]);
-    downloadTextFile(
-      `${run.dataset_name}-${run.id}.csv`,
-      csv,
-      "text/csv;charset=utf-8",
-    );
+    downloadTextFile(`${run.dataset_name}-${run.id}.csv`, csv, "text/csv;charset=utf-8");
   }
 
   return (
@@ -145,7 +116,7 @@ export default function EvalPage({ defaultDatasetName = "zh-policy-smoke" }: Eva
       </p>
       <div className="eval-actions">
         <button type="button" onClick={() => void handleRunEval()} disabled={isSubmitting}>
-          运行评测
+          {isSubmitting ? "运行中..." : "运行评测"}
         </button>
         <p>当前默认评测集为 {defaultDatasetName}，后续再扩成更完整的中文回归集。</p>
       </div>
@@ -163,6 +134,7 @@ export default function EvalPage({ defaultDatasetName = "zh-policy-smoke" }: Eva
             const detailFilter = detailFilters[run.id] ?? "all";
             const filteredDetails = filterEvalDetails(run.details, detailFilter);
             const detailSummary = summarizeEvalDetails(run.details);
+            const providerSnapshot = run.metrics.provider_snapshot;
 
             return (
               <article key={run.id} className="data-card eval-run-card">
@@ -190,6 +162,38 @@ export default function EvalPage({ defaultDatasetName = "zh-policy-smoke" }: Eva
                     );
                   })}
                 </div>
+                {providerSnapshot ? (
+                  <section className="eval-summary-card">
+                    <div className="eval-summary-card__header">
+                      <div>
+                        <h4>本次评测配置</h4>
+                        <p>用这组模型和向量配置跑出的结果，后续对比回归时直接看这里。</p>
+                      </div>
+                    </div>
+                    <div className="detail-grid">
+                      <div className="detail-item">
+                        <span>LLM Provider</span>
+                        <strong>{providerSnapshot.llm_provider}</strong>
+                      </div>
+                      <div className="detail-item">
+                        <span>LLM Model</span>
+                        <strong>{providerSnapshot.llm_model_name}</strong>
+                      </div>
+                      <div className="detail-item">
+                        <span>Embedding Provider</span>
+                        <strong>{providerSnapshot.embedding_provider}</strong>
+                      </div>
+                      <div className="detail-item">
+                        <span>Embedding Model</span>
+                        <strong>{providerSnapshot.embedding_model_name}</strong>
+                      </div>
+                      <div className="detail-item">
+                        <span>向量存储</span>
+                        <strong>{providerSnapshot.vector_store_provider}</strong>
+                      </div>
+                    </div>
+                  </section>
+                ) : null}
                 <div className="eval-run-card__footer">
                   <p>展开单题结果，逐条检查答案、引用和低置信度原因。</p>
                   <button
@@ -240,7 +244,9 @@ export default function EvalPage({ defaultDatasetName = "zh-policy-smoke" }: Eva
                         ))}
                       </div>
                       <div className="eval-detail-toolbar__actions">
-                        <span>当前显示 {filteredDetails.length} / {run.details.length} 题</span>
+                        <span>
+                          当前显示 {filteredDetails.length} / {run.details.length} 题
+                        </span>
                         <button
                           type="button"
                           className="secondary-button"

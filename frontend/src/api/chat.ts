@@ -1,4 +1,4 @@
-import { postJson } from "./client";
+import { postJson, requestJson } from "./client";
 
 export interface Citation {
   chunk_id: string;
@@ -35,6 +35,34 @@ export interface ChatAnswer {
   retrieval_trace?: RetrievalTrace | null;
 }
 
+export interface LlmReadiness {
+  provider: string;
+  model_name: string;
+  configured: boolean;
+  available: boolean;
+  status: string;
+  message: string;
+  endpoint?: string | null;
+}
+
+export interface LlmSmokeTest {
+  provider: string;
+  model_name: string;
+  configured: boolean;
+  available: boolean;
+  status: string;
+  message: string;
+  sample_question: string;
+  sample_evidence: string;
+  answer_preview: string;
+  latency_ms: number;
+  token_usage: {
+    input_tokens: number;
+    output_tokens: number;
+  };
+  endpoint?: string | null;
+}
+
 interface AskPolicyQuestionInput {
   question: string;
   tenantId?: string;
@@ -48,5 +76,15 @@ export async function askPolicyQuestion(input: AskPolicyQuestionInput): Promise<
     tenant_id: input.tenantId ?? "default-tenant",
     customer_id: input.customerId ?? "default-customer",
     session_id: input.sessionId ?? null,
+  });
+}
+
+export async function getLlmReadiness(): Promise<LlmReadiness> {
+  return requestJson<LlmReadiness>("/api/chat/llm-readiness");
+}
+
+export async function runLlmSmokeTest(): Promise<LlmSmokeTest> {
+  return requestJson<LlmSmokeTest>("/api/chat/llm-smoke-test", {
+    method: "POST",
   });
 }

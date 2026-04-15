@@ -23,6 +23,31 @@ class TokenUsagePayload(BaseModel):
     output_tokens: int = 0
 
 
+class LlmReadinessPayload(BaseModel):
+    provider: str
+    model_name: str
+    configured: bool
+    available: bool
+    status: str
+    message: str
+    endpoint: str | None = None
+
+
+class LlmSmokeTestPayload(BaseModel):
+    provider: str
+    model_name: str
+    configured: bool
+    available: bool
+    status: str
+    message: str
+    sample_question: str
+    sample_evidence: str
+    answer_preview: str
+    latency_ms: float
+    token_usage: TokenUsagePayload
+    endpoint: str | None = None
+
+
 class RetrievalTraceChunkPayload(BaseModel):
     chunk_id: str
     document_id: str
@@ -37,6 +62,10 @@ class RetrievalTracePayload(BaseModel):
     model_name: str
     token_usage: TokenUsagePayload
     selected_chunks: list[RetrievalTraceChunkPayload]
+    original_query: str | None = None
+    expanded_query: str | None = None
+    rewrite_rules: list[str] = Field(default_factory=list)
+    candidate_count: int = 0
 
 
 class ChatAskResponse(BaseModel):

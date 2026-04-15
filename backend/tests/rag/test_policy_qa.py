@@ -87,3 +87,130 @@ def test_policy_answer_confidence_is_clamped_to_one(
     )
 
     assert result.confidence == 1.0
+
+
+def test_answer_policy_question_rewrites_query_only_once(
+    monkeypatch,
+    seeded_policy_chunks: None,
+) -> None:
+    rewrite_calls = {"query_engine": 0, "retrievers": 0}
+
+    def fake_rewrite_query(question: str):
+        rewrite_calls["query_engine"] += 1
+        return type(
+            "RewriteResult",
+            (),
+            {
+                "expanded_query": f"{question} 扩展词",
+                "applied_rules": ["alias"],
+            },
+        )()
+
+    monkeypatch.setattr(query_engine_module, "rewrite_query", fake_rewrite_query)
+    monkeypatch.setattr(
+        "app.services.rag.retrievers.rewrite_query",
+        lambda question: (
+            rewrite_calls.__setitem__("retrievers", rewrite_calls["retrievers"] + 1)
+            or fake_rewrite_query(question)
+        ),
+    )
+
+    with SessionLocal() as session:
+        row = session.execute(
+            text(
+                """
+                SELECT knowledge_chunk.id AS chunk_id, knowledge_document.id AS document_id
+                FROM knowledge_chunk
+                JOIN knowledge_document ON knowledge_document.id = knowledge_chunk.document_id
+                LIMIT 1
+                """
+            )
+        ).one()
+        chunk_model = session.get(KnowledgeChunk, row.chunk_id)
+        document_model = session.get(KnowledgeDocument, row.document_id)
+
+    assert chunk_model is not None
+    assert document_model is not None
+
+    monkeypatch.setattr(
+        query_engine_module,
+        "retrieve_hybrid",
+        lambda query_text, tenant_id, customer_id, top_k: [
+            query_engine_module.RetrievalHit(
+                chunk=chunk_model,
+                document=document_model,
+                dense_score=0.81,
+                lexical_score=0.62,
+                combined_score=0.75,
+            )
+        ],
+    )
+    monkeypatch.setattr(query_engine_module, "retrieve_dense", lambda *args, **kwargs: [])
+    monkeypatch.setattr(query_engine_module, "retrieve_lexical", lambda *args, **kwargs: [])
+
+    result = query_engine_module.answer_policy_question(
+        question="北京酒店报销上限是多少？",
+        tenant_id="t1",
+        customer_id="c1",
+    )
+
+    assert result.citations
+    assert rewrite_calls["query_engine"] == 1
+    assert rewrite_calls["retrievers"] == 0
+
+
+def test_llm_gateway_readiness_endpoint_returns_status(client, monkeypatch) -> None:
+    monkeypatch.setattr(
+        "app.api.routes.chat.check_llm_readiness",
+        lambda: type(
+            "Readiness",
+            (),
+            {
+                "provider": "openai-compatible",
+                "model_name": "gpt-4o-mini",
+                "configured": True,
+                "available": True,
+                "status": "ready",
+                "message": "LLM 网关连通正常。",
+                "endpoint": "https://gateway.example.com/v1",
+            },
+        )(),
+    )
+
+    response = client.get("/api/chat/llm-readiness")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["available"] is True
+    assert payload["status"] == "ready"
+
+
+def test_llm_gateway_smoke_test_endpoint_returns_preview(client, monkeypatch) -> None:
+    monkeypatch.setattr(
+        "app.api.routes.chat.run_llm_smoke_test",
+        lambda: type(
+            "SmokeTest",
+            (),
+            {
+                "provider": "openai-compatible",
+                "model_name": "gpt-4o-mini",
+                "configured": True,
+                "available": True,
+                "status": "ready",
+                "message": "LLM 烟雾测试通过。",
+                "endpoint": "https://gateway.example.com/v1",
+                "sample_question": "北京酒店报销上限是多少？",
+                "sample_evidence": "北京酒店报销上限为每晚 650 元。",
+                "answer_preview": "根据当前证据，北京酒店报销上限为每晚 650 元。",
+                "latency_ms": 15.4,
+                "token_usage": {"input_tokens": 12, "output_tokens": 8},
+            },
+        )(),
+    )
+
+    response = client.post("/api/chat/llm-smoke-test")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["available"] is True
+    assert payload["answer_preview"].startswith("根据当前证据")

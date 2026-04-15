@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from time import perf_counter
 
 import httpx
 
@@ -14,6 +15,38 @@ class AnswerDraft:
     confidence: float
     model_name: str
     token_usage: dict[str, int]
+
+
+@dataclass(frozen=True)
+class LlmReadiness:
+    provider: str
+    model_name: str
+    configured: bool
+    available: bool
+    status: str
+    message: str
+    endpoint: str | None = None
+
+
+@dataclass(frozen=True)
+class LlmSmokeTestResult:
+    provider: str
+    model_name: str
+    configured: bool
+    available: bool
+    status: str
+    message: str
+    sample_question: str
+    sample_evidence: str
+    answer_preview: str
+    latency_ms: float
+    token_usage: dict[str, int]
+    endpoint: str | None = None
+
+
+DEFAULT_SMOKE_TEST_QUESTION = "北京酒店报销上限是多少？"
+DEFAULT_SMOKE_TEST_EVIDENCE = "北京酒店报销上限为每晚 650 元。"
+DEFAULT_SMOKE_TEST_PROMPT = "请严格基于证据回答，不要编造未出现的信息。"
 
 
 class DeterministicPolicyAnswerClient:
@@ -151,3 +184,256 @@ def get_policy_answer_client() -> DeterministicPolicyAnswerClient | OpenAICompat
             model_name=settings.llm_model_name,
         )
     return DeterministicPolicyAnswerClient()
+
+
+def _resolve_llm_gateway_settings(
+    *,
+    provider: str | None = None,
+    base_url: str | None = None,
+    api_key: str | None = None,
+    model_name: str | None = None,
+) -> tuple[str, str, str, str]:
+    settings = get_settings()
+    return (
+        (provider or settings.llm_provider).strip().lower(),
+        (base_url or settings.llm_api_base_url).strip(),
+        (api_key or settings.llm_api_key).strip(),
+        (model_name or settings.llm_model_name).strip(),
+    )
+
+
+def _supports_models_endpoint(status_code: int) -> bool:
+    return status_code not in {404, 405, 501}
+
+
+def _probe_chat_completion(
+    *,
+    base_url: str,
+    api_key: str,
+    model_name: str,
+    http_client: httpx.Client,
+) -> None:
+    response = http_client.post(
+        f"{base_url.rstrip('/')}/chat/completions",
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        },
+        json={
+            "model": model_name,
+            "max_tokens": 1,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": "ping",
+                }
+            ],
+        },
+    )
+    response.raise_for_status()
+
+
+def check_llm_readiness(
+    *,
+    provider: str | None = None,
+    base_url: str | None = None,
+    api_key: str | None = None,
+    model_name: str | None = None,
+    http_client: httpx.Client | None = None,
+) -> LlmReadiness:
+    resolved_provider, resolved_base_url, resolved_api_key, resolved_model_name = (
+        _resolve_llm_gateway_settings(
+            provider=provider,
+            base_url=base_url,
+            api_key=api_key,
+            model_name=model_name,
+        )
+    )
+
+    if resolved_provider != "openai-compatible":
+        return LlmReadiness(
+            provider="deterministic",
+            model_name=DeterministicPolicyAnswerClient.model_name,
+            configured=True,
+            available=True,
+            status="ready",
+            message="当前使用本地 deterministic LLM，无需额外网关连通性检查。",
+        )
+
+    if not resolved_base_url or not resolved_api_key:
+        return LlmReadiness(
+            provider="openai-compatible",
+            model_name=resolved_model_name,
+            configured=False,
+            available=False,
+            status="missing_config",
+            message="缺少 LLM_API_BASE_URL 或 LLM_API_KEY。",
+            endpoint=resolved_base_url or None,
+        )
+
+    client = http_client or httpx.Client(timeout=5.0)
+    try:
+        response = client.get(
+            f"{resolved_base_url.rstrip('/')}/models",
+            headers={"Authorization": f"Bearer {resolved_api_key}"},
+        )
+        response.raise_for_status()
+        payload = response.json()
+        model_ids = [
+            str(item.get("id"))
+            for item in payload.get("data", [])
+            if isinstance(item, dict) and item.get("id")
+        ]
+    except httpx.HTTPStatusError as exc:
+        if _supports_models_endpoint(exc.response.status_code):
+            return LlmReadiness(
+                provider="openai-compatible",
+                model_name=resolved_model_name,
+                configured=True,
+                available=False,
+                status="unreachable",
+                message=f"LLM 网关不可达：{exc}",
+                endpoint=resolved_base_url,
+            )
+
+        try:
+            _probe_chat_completion(
+                base_url=resolved_base_url,
+                api_key=resolved_api_key,
+                model_name=resolved_model_name,
+                http_client=client,
+            )
+        except Exception as probe_exc:
+            return LlmReadiness(
+                provider="openai-compatible",
+                model_name=resolved_model_name,
+                configured=True,
+                available=False,
+                status="unreachable",
+                message=f"LLM 网关不可达：/models 不可用，且最小推理探活失败：{probe_exc}",
+                endpoint=resolved_base_url,
+            )
+
+        return LlmReadiness(
+            provider="openai-compatible",
+            model_name=resolved_model_name,
+            configured=True,
+            available=True,
+            status="ready",
+            message=f"LLM 网关连通正常；/models 不可用，已通过真实推理探活验证 {resolved_model_name}。",
+            endpoint=resolved_base_url,
+        )
+    except Exception as exc:
+        return LlmReadiness(
+            provider="openai-compatible",
+            model_name=resolved_model_name,
+            configured=True,
+            available=False,
+            status="unreachable",
+            message=f"LLM 网关不可达：{exc}",
+            endpoint=resolved_base_url,
+        )
+
+    model_hint = (
+        f"；当前模型 {resolved_model_name} 已在网关列表中。"
+        if resolved_model_name in model_ids
+        else f"；当前模型 {resolved_model_name} 未在网关列表中显式返回。"
+    )
+    return LlmReadiness(
+        provider="openai-compatible",
+        model_name=resolved_model_name,
+        configured=True,
+        available=True,
+        status="ready",
+        message=f"LLM 网关连通正常{model_hint}",
+        endpoint=resolved_base_url,
+    )
+
+
+def run_llm_smoke_test(
+    *,
+    provider: str | None = None,
+    base_url: str | None = None,
+    api_key: str | None = None,
+    model_name: str | None = None,
+    http_client: httpx.Client | None = None,
+    sample_question: str = DEFAULT_SMOKE_TEST_QUESTION,
+    sample_evidence: str = DEFAULT_SMOKE_TEST_EVIDENCE,
+    prompt_template: str = DEFAULT_SMOKE_TEST_PROMPT,
+) -> LlmSmokeTestResult:
+    resolved_provider, resolved_base_url, resolved_api_key, resolved_model_name = (
+        _resolve_llm_gateway_settings(
+            provider=provider,
+            base_url=base_url,
+            api_key=api_key,
+            model_name=model_name,
+        )
+    )
+    if resolved_provider == "openai-compatible" and (not resolved_base_url or not resolved_api_key):
+        return LlmSmokeTestResult(
+            provider="openai-compatible",
+            model_name=resolved_model_name,
+            configured=False,
+            available=False,
+            status="missing_config",
+            message="缺少 LLM_API_BASE_URL 或 LLM_API_KEY。",
+            sample_question=sample_question,
+            sample_evidence=sample_evidence,
+            answer_preview="",
+            latency_ms=0.0,
+            token_usage={"input_tokens": 0, "output_tokens": 0},
+            endpoint=resolved_base_url or None,
+        )
+
+    if resolved_provider == "openai-compatible":
+        client = OpenAICompatiblePolicyAnswerClient(
+            base_url=resolved_base_url,
+            api_key=resolved_api_key,
+            model_name=resolved_model_name,
+            http_client=http_client,
+        )
+        result_provider = "openai-compatible"
+        endpoint = resolved_base_url
+    else:
+        client = DeterministicPolicyAnswerClient()
+        result_provider = "deterministic"
+        endpoint = None
+
+    started_at = perf_counter()
+    try:
+        answer_draft = client.generate_answer(
+            question=sample_question,
+            evidence_snippets=[sample_evidence],
+            confidence=0.88,
+            prompt_template=prompt_template,
+        )
+    except Exception as exc:
+        return LlmSmokeTestResult(
+            provider=result_provider,
+            model_name=resolved_model_name,
+            configured=True,
+            available=False,
+            status="failed",
+            message=f"LLM 烟雾测试失败：{exc}",
+            sample_question=sample_question,
+            sample_evidence=sample_evidence,
+            answer_preview="",
+            latency_ms=round((perf_counter() - started_at) * 1000, 2),
+            token_usage={"input_tokens": 0, "output_tokens": 0},
+            endpoint=endpoint,
+        )
+
+    return LlmSmokeTestResult(
+        provider=result_provider,
+        model_name=answer_draft.model_name,
+        configured=True,
+        available=True,
+        status="ready",
+        message="LLM 烟雾测试通过。",
+        sample_question=sample_question,
+        sample_evidence=sample_evidence,
+        answer_preview=answer_draft.answer,
+        latency_ms=round((perf_counter() - started_at) * 1000, 2),
+        token_usage=answer_draft.token_usage,
+        endpoint=endpoint,
+    )

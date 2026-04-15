@@ -17,6 +17,15 @@ def _as_csv_tuple(value: str | None, default: tuple[str, ...]) -> tuple[str, ...
     return items or default
 
 
+def _as_optional_int(value: str | None) -> int | None:
+    if value is None:
+        return None
+    stripped = value.strip()
+    if not stripped:
+        return None
+    return int(stripped)
+
+
 @dataclass(frozen=True)
 class Settings:
     app_name: str
@@ -46,10 +55,16 @@ class Settings:
     embedding_dimension: int
     embedding_batch_size: int
     embedding_max_retries: int
+    embedding_request_dimensions: int | None
+    embedding_encoding_format: str
     chunk_size: int
     chunk_overlap: int
     chat_top_k: int
     chat_confidence_threshold: float
+    rag_dense_candidate_multiplier: int
+    rag_lexical_candidate_multiplier: int
+    rag_rrf_k: int
+    rag_max_chunks_per_document: int
     llm_provider: str
     llm_model_name: str
     llm_api_base_url: str
@@ -100,10 +115,16 @@ def get_settings() -> Settings:
         embedding_dimension=int(os.getenv("EMBEDDING_DIMENSION", "16")),
         embedding_batch_size=int(os.getenv("EMBEDDING_BATCH_SIZE", "16")),
         embedding_max_retries=int(os.getenv("EMBEDDING_MAX_RETRIES", "2")),
+        embedding_request_dimensions=_as_optional_int(os.getenv("EMBEDDING_REQUEST_DIMENSIONS")),
+        embedding_encoding_format=os.getenv("EMBEDDING_ENCODING_FORMAT", "float").strip(),
         chunk_size=int(os.getenv("CHUNK_SIZE", "450")),
         chunk_overlap=int(os.getenv("CHUNK_OVERLAP", "1")),
         chat_top_k=int(os.getenv("CHAT_TOP_K", "3")),
         chat_confidence_threshold=float(os.getenv("CHAT_CONFIDENCE_THRESHOLD", "0.2")),
+        rag_dense_candidate_multiplier=int(os.getenv("RAG_DENSE_CANDIDATE_MULTIPLIER", "3")),
+        rag_lexical_candidate_multiplier=int(os.getenv("RAG_LEXICAL_CANDIDATE_MULTIPLIER", "12")),
+        rag_rrf_k=int(os.getenv("RAG_RRF_K", "60")),
+        rag_max_chunks_per_document=int(os.getenv("RAG_MAX_CHUNKS_PER_DOCUMENT", "2")),
         llm_provider=os.getenv("LLM_PROVIDER", "deterministic").lower(),
         llm_model_name=os.getenv("LLM_MODEL_NAME", "deterministic-policy-client"),
         llm_api_base_url=os.getenv("LLM_API_BASE_URL", "").strip(),

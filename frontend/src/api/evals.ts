@@ -1,5 +1,13 @@
 import { postJson, requestJson } from "./client";
 
+export interface EvalProviderSnapshot {
+  llm_provider: string;
+  llm_model_name: string;
+  embedding_provider: string;
+  embedding_model_name: string;
+  vector_store_provider: string;
+}
+
 export interface EvalRun {
   id: string;
   dataset_name: string;
@@ -10,6 +18,7 @@ export interface EvalRun {
     answer_recall?: number;
     citation_hit_rate: number;
     low_confidence_rate: number;
+    provider_snapshot?: EvalProviderSnapshot | null;
   };
   details: {
     question: string;

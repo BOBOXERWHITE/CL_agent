@@ -14,9 +14,9 @@ from app.services.prompts.service import PromptSelection, get_prompt_selection
 from app.services.rag.citation_service import CitationRecord, build_citations
 from app.services.rag.query_rewriter import rewrite_query
 from app.services.rag.rerankers import rerank_hits
-from app.services.rag.retrievers import RetrievalHit, retrieve_dense, retrieve_lexical
-from app.services.system_settings import get_effective_business_settings
+from app.services.rag.retrievers import RetrievalHit, retrieve_dense, retrieve_hybrid, retrieve_lexical
 from app.services.rag.text_processing import extract_cjk_sequences
+from app.services.system_settings import get_effective_business_settings
 
 
 @dataclass(frozen=True)
@@ -44,6 +44,10 @@ class RetrievalTrace:
     model_name: str
     token_usage: dict[str, int]
     selected_chunks: list[RetrievalTraceChunk]
+    original_query: str
+    expanded_query: str
+    rewrite_rules: list[str]
+    candidate_count: int
 
     def as_dict(self) -> dict[str, object]:
         return {
@@ -61,6 +65,10 @@ class RetrievalTrace:
                 }
                 for item in self.selected_chunks
             ],
+            "original_query": self.original_query,
+            "expanded_query": self.expanded_query,
+            "rewrite_rules": self.rewrite_rules,
+            "candidate_count": self.candidate_count,
         }
 
 
@@ -83,18 +91,8 @@ def _load_chunk_map(chunk_ids: Iterable[str]) -> dict[str, tuple[KnowledgeChunk,
     return {chunk.id: (chunk, document) for chunk, document in rows}
 
 
-def _lexical_search(question: str, tenant_id: str, customer_id: str, top_k: int) -> list[tuple[KnowledgeChunk, KnowledgeDocument, float]]:
-    return [
-        (hit.chunk, hit.document, hit.combined_score)
-        for hit in retrieve_lexical(question, tenant_id, customer_id, top_k)
-    ]
-
-
-def _vector_search(question: str, tenant_id: str, customer_id: str, top_k: int) -> list[tuple[KnowledgeChunk, KnowledgeDocument, float]]:
-    return [
-        (hit.chunk, hit.document, hit.combined_score)
-        for hit in retrieve_dense(question, tenant_id, customer_id, top_k)
-    ]
+def _records_from_hits(hits: list[RetrievalHit]) -> list[tuple[KnowledgeChunk, KnowledgeDocument, float]]:
+    return [(hit.chunk, hit.document, hit.combined_score) for hit in hits]
 
 
 def _to_hit_records(records: list[tuple[KnowledgeChunk, KnowledgeDocument, float]]) -> list[RetrievalHit]:
@@ -113,8 +111,12 @@ def _to_hit_records(records: list[tuple[KnowledgeChunk, KnowledgeDocument, float
 
 
 def _hybrid_search(question: str, tenant_id: str, customer_id: str, top_k: int) -> list[tuple[KnowledgeChunk, KnowledgeDocument, float]]:
-    dense_records = _vector_search(question, tenant_id, customer_id, max(top_k * 2, top_k))
-    lexical_records = _lexical_search(question, tenant_id, customer_id, max(top_k * 2, top_k))
+    dense_records = _vector_search(question, tenant_id, customer_id, top_k)
+    lexical_records = _lexical_search(question, tenant_id, customer_id, top_k)
+
+    if not dense_records and not lexical_records:
+        reranked = rerank_hits(question, retrieve_hybrid(question, tenant_id, customer_id, top_k), top_k)
+        return _records_from_hits(reranked)
 
     merged: dict[str, RetrievalHit] = {}
     for hit in [*_to_hit_records(dense_records), *_to_hit_records(lexical_records)]:
@@ -123,7 +125,17 @@ def _hybrid_search(question: str, tenant_id: str, customer_id: str, top_k: int) 
             merged[hit.chunk.id] = hit
 
     reranked = rerank_hits(question, list(merged.values()), top_k)
-    return [(hit.chunk, hit.document, hit.combined_score) for hit in reranked]
+    return _records_from_hits(reranked)
+
+
+def _lexical_search(question: str, tenant_id: str, customer_id: str, top_k: int) -> list[tuple[KnowledgeChunk, KnowledgeDocument, float]]:
+    reranked = rerank_hits(question, retrieve_lexical(question, tenant_id, customer_id, top_k), top_k)
+    return _records_from_hits(reranked)
+
+
+def _vector_search(question: str, tenant_id: str, customer_id: str, top_k: int) -> list[tuple[KnowledgeChunk, KnowledgeDocument, float]]:
+    reranked = rerank_hits(question, retrieve_dense(question, tenant_id, customer_id, top_k), top_k)
+    return _records_from_hits(reranked)
 
 
 def _build_trace(
@@ -133,6 +145,10 @@ def _build_trace(
     citations: list[CitationRecord],
     model_name: str,
     token_usage: dict[str, int],
+    original_query: str,
+    expanded_query: str,
+    rewrite_rules: list[str],
+    candidate_count: int,
 ) -> RetrievalTrace:
     selected_chunks = [
         RetrievalTraceChunk(
@@ -150,6 +166,10 @@ def _build_trace(
         model_name=model_name,
         token_usage=token_usage,
         selected_chunks=selected_chunks,
+        original_query=original_query,
+        expanded_query=expanded_query,
+        rewrite_rules=rewrite_rules,
+        candidate_count=candidate_count,
     )
 
 
@@ -190,6 +210,7 @@ def answer_policy_question(question: str, tenant_id: str, customer_id: str) -> P
     retrieval_elapsed_ms = int((perf_counter() - retrieval_started_at) * 1000)
 
     citations = build_citations(retrievals)
+    candidate_count = len(retrievals)
     if not citations:
         no_evidence_answer = (
             "当前没有检索到足够的政策证据，暂时无法给出可信回答。"
@@ -202,6 +223,10 @@ def answer_policy_question(question: str, tenant_id: str, customer_id: str) -> P
             citations=[],
             model_name=client_model_name,
             token_usage={"input_tokens": 0, "output_tokens": 0},
+            original_query=question,
+            expanded_query=rewritten_query.expanded_query,
+            rewrite_rules=rewritten_query.applied_rules,
+            candidate_count=candidate_count,
         )
         return PolicyAnswerResult(
             answer=no_evidence_answer,
@@ -225,6 +250,10 @@ def answer_policy_question(question: str, tenant_id: str, customer_id: str) -> P
             citations=citations,
             model_name=client_model_name,
             token_usage={"input_tokens": 0, "output_tokens": 0},
+            original_query=question,
+            expanded_query=rewritten_query.expanded_query,
+            rewrite_rules=rewritten_query.applied_rules,
+            candidate_count=candidate_count,
         )
         return PolicyAnswerResult(
             answer=low_confidence_answer,
@@ -248,6 +277,10 @@ def answer_policy_question(question: str, tenant_id: str, customer_id: str) -> P
         citations=citations,
         model_name=answer_draft.model_name,
         token_usage=answer_draft.token_usage,
+        original_query=question,
+        expanded_query=rewritten_query.expanded_query,
+        rewrite_rules=rewritten_query.applied_rules,
+        candidate_count=candidate_count,
     )
     return PolicyAnswerResult(
         answer=answer_draft.answer,

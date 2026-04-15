@@ -88,10 +88,18 @@ export async function checkKnowledgeEmbeddingReadiness(): Promise<KnowledgeEmbed
   return requestJson<KnowledgeEmbeddingReadiness>("/api/knowledge/embedding-readiness");
 }
 
+export async function getEmbeddingReadiness(): Promise<KnowledgeEmbeddingReadiness> {
+  return checkKnowledgeEmbeddingReadiness();
+}
+
 export async function runKnowledgeEmbeddingSmokeTest(): Promise<KnowledgeEmbeddingSmokeTest> {
   return requestJson<KnowledgeEmbeddingSmokeTest>("/api/knowledge/embedding-smoke-test", {
     method: "POST",
   });
+}
+
+export async function runEmbeddingSmokeTest(): Promise<KnowledgeEmbeddingSmokeTest> {
+  return runKnowledgeEmbeddingSmokeTest();
 }
 
 export async function uploadKnowledgeDocument(

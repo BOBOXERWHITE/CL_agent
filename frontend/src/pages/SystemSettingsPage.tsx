@@ -1,5 +1,12 @@
 import { FormEvent, useEffect, useState } from "react";
 
+import { getLlmReadiness, runLlmSmokeTest, type LlmReadiness, type LlmSmokeTest } from "../api/chat";
+import {
+  getEmbeddingReadiness,
+  runEmbeddingSmokeTest,
+  type KnowledgeEmbeddingReadiness,
+  type KnowledgeEmbeddingSmokeTest,
+} from "../api/knowledge";
 import {
   getSystemSettings,
   updateSystemSettings,
@@ -19,13 +26,25 @@ const EMPTY_EDITABLE_SETTINGS: EditableSystemSettings = {
   default_eval_dataset: "zh-policy-smoke",
 };
 
+function formatLatency(latencyMs: number): string {
+  return `${latencyMs.toFixed(1)} ms`;
+}
+
 export default function SystemSettingsPage({ onSaved }: SystemSettingsPageProps) {
   const [editableSettings, setEditableSettings] = useState<EditableSystemSettings>(EMPTY_EDITABLE_SETTINGS);
   const [runtimeSettings, setRuntimeSettings] = useState<RuntimeSystemSettings | null>(null);
+  const [llmReadiness, setLlmReadiness] = useState<LlmReadiness | null>(null);
+  const [llmSmokeTest, setLlmSmokeTest] = useState<LlmSmokeTest | null>(null);
+  const [embeddingReadiness, setEmbeddingReadiness] = useState<KnowledgeEmbeddingReadiness | null>(null);
+  const [embeddingSmokeTest, setEmbeddingSmokeTest] = useState<KnowledgeEmbeddingSmokeTest | null>(null);
   const [errorMessage, setErrorMessage] = useState("");
   const [successMessage, setSuccessMessage] = useState("");
   const [isLoading, setIsLoading] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
+  const [isCheckingLlm, setIsCheckingLlm] = useState(false);
+  const [isRunningLlmSmokeTest, setIsRunningLlmSmokeTest] = useState(false);
+  const [isCheckingEmbedding, setIsCheckingEmbedding] = useState(false);
+  const [isRunningEmbeddingSmokeTest, setIsRunningEmbeddingSmokeTest] = useState(false);
 
   async function loadSettings() {
     setIsLoading(true);
@@ -63,6 +82,54 @@ export default function SystemSettingsPage({ onSaved }: SystemSettingsPageProps)
     }
   }
 
+  async function handleCheckLlmReadiness() {
+    setIsCheckingLlm(true);
+    setErrorMessage("");
+    try {
+      setLlmReadiness(await getLlmReadiness());
+    } catch (error: unknown) {
+      setErrorMessage(error instanceof Error ? error.message : "LLM 网关检查失败。");
+    } finally {
+      setIsCheckingLlm(false);
+    }
+  }
+
+  async function handleRunLlmSmokeTest() {
+    setIsRunningLlmSmokeTest(true);
+    setErrorMessage("");
+    try {
+      setLlmSmokeTest(await runLlmSmokeTest());
+    } catch (error: unknown) {
+      setErrorMessage(error instanceof Error ? error.message : "LLM 烟雾测试失败。");
+    } finally {
+      setIsRunningLlmSmokeTest(false);
+    }
+  }
+
+  async function handleCheckEmbeddingReadiness() {
+    setIsCheckingEmbedding(true);
+    setErrorMessage("");
+    try {
+      setEmbeddingReadiness(await getEmbeddingReadiness());
+    } catch (error: unknown) {
+      setErrorMessage(error instanceof Error ? error.message : "Embedding 网关检查失败。");
+    } finally {
+      setIsCheckingEmbedding(false);
+    }
+  }
+
+  async function handleRunEmbeddingSmokeTest() {
+    setIsRunningEmbeddingSmokeTest(true);
+    setErrorMessage("");
+    try {
+      setEmbeddingSmokeTest(await runEmbeddingSmokeTest());
+    } catch (error: unknown) {
+      setErrorMessage(error instanceof Error ? error.message : "Embedding 烟雾测试失败。");
+    } finally {
+      setIsRunningEmbeddingSmokeTest(false);
+    }
+  }
+
   return (
     <section className="panel">
       <div className="panel__header">
@@ -73,8 +140,8 @@ export default function SystemSettingsPage({ onSaved }: SystemSettingsPageProps)
         <span className="panel__tag">admin only</span>
       </div>
       <p className="panel__description">
-        这里仅维护业务安全配置。基础设施地址、密钥、模型网关和 `.env`
-        不在面板内编辑，仍然由部署环境控制。
+        这里只维护业务安全配置和模型网关联调结果。基础设施地址、密钥和 `.env`
+        仍由部署环境控制，不在页面内直接编辑。
       </p>
 
       {errorMessage ? <p className="panel__error">{errorMessage}</p> : null}
@@ -168,7 +235,7 @@ export default function SystemSettingsPage({ onSaved }: SystemSettingsPageProps)
 
           <div className="prompt-form__footer">
             <p className="upload-form__caption">
-              修改后，问答默认参数、页面默认租户 / 客户和默认评测集会优先读取这里的配置。
+              这些值会覆盖页面默认租户、默认客户、问答检索阈值和默认评测集。
             </p>
             <button type="submit" disabled={isSaving || isLoading}>
               {isSaving ? "保存中..." : "保存设置"}
@@ -217,6 +284,144 @@ export default function SystemSettingsPage({ onSaved }: SystemSettingsPageProps)
           ) : (
             <p className="data-table__empty">正在加载运行配置...</p>
           )}
+        </article>
+      </div>
+
+      <div className="settings-layout">
+        <article className="data-card">
+          <div className="data-card__header">
+            <div>
+              <h3>LLM 网关联调</h3>
+              <span>检查模型列表与对话生成</span>
+            </div>
+          </div>
+          <div className="eval-detail-toolbar__actions">
+            <button
+              type="button"
+              className="secondary-button"
+              onClick={() => void handleCheckLlmReadiness()}
+              disabled={isCheckingLlm}
+            >
+              {isCheckingLlm ? "检查中..." : "检查 LLM 网关"}
+            </button>
+            <button
+              type="button"
+              className="secondary-button"
+              onClick={() => void handleRunLlmSmokeTest()}
+              disabled={isRunningLlmSmokeTest}
+            >
+              {isRunningLlmSmokeTest ? "执行中..." : "执行 LLM 烟雾测试"}
+            </button>
+          </div>
+          {llmReadiness ? (
+            <div className="detail-grid">
+              <div className="detail-item">
+                <span>状态</span>
+                <strong>{llmReadiness.status}</strong>
+              </div>
+              <div className="detail-item">
+                <span>模型</span>
+                <strong>{llmReadiness.model_name}</strong>
+              </div>
+              <div className="detail-item detail-item--full">
+                <span>结果</span>
+                <strong>{llmReadiness.message}</strong>
+              </div>
+              {llmReadiness.endpoint ? (
+                <div className="detail-item detail-item--full">
+                  <span>网关地址</span>
+                  <strong>{llmReadiness.endpoint}</strong>
+                </div>
+              ) : null}
+            </div>
+          ) : null}
+          {llmSmokeTest ? (
+            <div className="detail-grid">
+              <div className="detail-item">
+                <span>延迟</span>
+                <strong>{formatLatency(llmSmokeTest.latency_ms)}</strong>
+              </div>
+              <div className="detail-item">
+                <span>Token 用量</span>
+                <strong>
+                  {llmSmokeTest.token_usage.input_tokens} / {llmSmokeTest.token_usage.output_tokens}
+                </strong>
+              </div>
+              <div className="detail-item detail-item--full">
+                <span>结果</span>
+                <strong>{llmSmokeTest.message}</strong>
+              </div>
+              <div className="detail-item detail-item--full">
+                <span>答案预览</span>
+                <strong>{llmSmokeTest.answer_preview || "无"}</strong>
+              </div>
+            </div>
+          ) : null}
+        </article>
+
+        <article className="data-card">
+          <div className="data-card__header">
+            <div>
+              <h3>Embedding 网关联调</h3>
+              <span>检查模型列表与向量生成</span>
+            </div>
+          </div>
+          <div className="eval-detail-toolbar__actions">
+            <button
+              type="button"
+              className="secondary-button"
+              onClick={() => void handleCheckEmbeddingReadiness()}
+              disabled={isCheckingEmbedding}
+            >
+              {isCheckingEmbedding ? "检查中..." : "检查 Embedding 网关"}
+            </button>
+            <button
+              type="button"
+              className="secondary-button"
+              onClick={() => void handleRunEmbeddingSmokeTest()}
+              disabled={isRunningEmbeddingSmokeTest}
+            >
+              {isRunningEmbeddingSmokeTest ? "执行中..." : "执行 Embedding 烟雾测试"}
+            </button>
+          </div>
+          {embeddingReadiness ? (
+            <div className="detail-grid">
+              <div className="detail-item">
+                <span>状态</span>
+                <strong>{embeddingReadiness.status}</strong>
+              </div>
+              <div className="detail-item">
+                <span>模型</span>
+                <strong>{embeddingReadiness.model_name}</strong>
+              </div>
+              <div className="detail-item detail-item--full">
+                <span>结果</span>
+                <strong>{embeddingReadiness.message}</strong>
+              </div>
+              {embeddingReadiness.endpoint ? (
+                <div className="detail-item detail-item--full">
+                  <span>网关地址</span>
+                  <strong>{embeddingReadiness.endpoint}</strong>
+                </div>
+              ) : null}
+            </div>
+          ) : null}
+          {embeddingSmokeTest ? (
+            <div className="detail-grid">
+              <div className="detail-item">
+                <span>延迟</span>
+                <strong>{formatLatency(embeddingSmokeTest.latency_ms)}</strong>
+              </div>
+              <div className="detail-item">
+                <span>向量维度</span>
+                <strong>{embeddingSmokeTest.vector_dimension}</strong>
+              </div>
+              <div className="detail-item detail-item--full">
+                <span>结果</span>
+                <strong>{embeddingSmokeTest.message}</strong>
+              </div>
+            </div>
+          ) : null}
         </article>
       </div>
     </section>

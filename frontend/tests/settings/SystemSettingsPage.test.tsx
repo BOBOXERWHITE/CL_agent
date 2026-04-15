@@ -3,6 +3,60 @@ import { vi } from "vitest";
 
 import SystemSettingsPage from "../../src/pages/SystemSettingsPage";
 
+vi.mock("../../src/api/chat", () => ({
+  getLlmReadiness: vi.fn().mockResolvedValue({
+    provider: "openai-compatible",
+    model_name: "gpt-4o-mini",
+    configured: true,
+    available: true,
+    status: "ready",
+    message: "LLM 网关连通正常。",
+    endpoint: "https://gateway.example.com/v1",
+  }),
+  runLlmSmokeTest: vi.fn().mockResolvedValue({
+    provider: "openai-compatible",
+    model_name: "gpt-4o-mini",
+    configured: true,
+    available: true,
+    status: "ready",
+    message: "LLM 烟雾测试通过。",
+    endpoint: "https://gateway.example.com/v1",
+    sample_question: "北京酒店报销上限是多少？",
+    sample_evidence: "北京酒店报销上限为每晚 650 元。",
+    answer_preview: "根据当前证据，北京酒店报销上限为每晚 650 元。",
+    latency_ms: 18.2,
+    token_usage: {
+      input_tokens: 12,
+      output_tokens: 8,
+    },
+  }),
+  askPolicyQuestion: vi.fn(),
+}));
+
+vi.mock("../../src/api/knowledge", () => ({
+  getEmbeddingReadiness: vi.fn().mockResolvedValue({
+    provider: "openai-compatible",
+    model_name: "text-embedding-3-small",
+    configured: true,
+    available: true,
+    status: "ready",
+    message: "Embedding 网关连通正常。",
+    endpoint: "https://gateway.example.com/v1",
+  }),
+  runEmbeddingSmokeTest: vi.fn().mockResolvedValue({
+    provider: "openai-compatible",
+    model_name: "text-embedding-3-small",
+    configured: true,
+    available: true,
+    status: "ready",
+    message: "Embedding 烟雾测试通过。",
+    endpoint: "https://gateway.example.com/v1",
+    sample_text: "北京酒店报销上限",
+    latency_ms: 10.6,
+    vector_dimension: 1536,
+  }),
+}));
+
 vi.mock("../../src/api/settings", () => ({
   getSystemSettings: vi.fn().mockResolvedValue({
     editable_settings: {
@@ -68,8 +122,30 @@ test("loads and saves system settings while showing runtime config", async () =>
   fireEvent.click(screen.getByRole("button", { name: "保存设置" }));
 
   await waitFor(() => {
-    expect(screen.getByText("系统设置已保存。")).toBeInTheDocument();
+  expect(screen.getByText("系统设置已保存。")).toBeInTheDocument();
   });
 
   expect(screen.getByDisplayValue("企业租户")).toBeInTheDocument();
+
+  fireEvent.click(screen.getByRole("button", { name: "检查 LLM 网关" }));
+  await waitFor(() => {
+    expect(screen.getByText("LLM 网关连通正常。")).toBeInTheDocument();
+  });
+
+  fireEvent.click(screen.getByRole("button", { name: "执行 LLM 烟雾测试" }));
+  await waitFor(() => {
+    expect(screen.getByText("LLM 烟雾测试通过。")).toBeInTheDocument();
+  });
+  expect(screen.getByText(/gpt-4o-mini/)).toBeInTheDocument();
+
+  fireEvent.click(screen.getByRole("button", { name: "检查 Embedding 网关" }));
+  await waitFor(() => {
+    expect(screen.getByText("Embedding 网关连通正常。")).toBeInTheDocument();
+  });
+
+  fireEvent.click(screen.getByRole("button", { name: "执行 Embedding 烟雾测试" }));
+  await waitFor(() => {
+    expect(screen.getByText("Embedding 烟雾测试通过。")).toBeInTheDocument();
+  });
+  expect(screen.getByText(/1536/)).toBeInTheDocument();
 });

@@ -412,3 +412,51 @@ cd frontend && npm run build
 - 政策问答页面现在支持填写 `租户 ID` 和 `客户 ID`
 - 这两个值必须与知识入库时使用的值保持一致，否则检索会因为隔离条件不匹配而返回空证据
 - 如果页面提示“当前没有检索到足够的政策证据”，先核对问答页和入库页的 `租户 ID / 客户 ID` 是否一致
+
+## 2026-04-13 Iteration Addendum
+
+This round added two concrete capabilities on top of the existing Task 9 baseline:
+
+- real `LLM / Embedding` gateway readiness checks and smoke tests
+- retrieval-chain hardening for production-like usage
+
+### New APIs
+
+- `GET /api/chat/llm-readiness`
+- `POST /api/chat/llm-smoke-test`
+- `GET /api/knowledge/embedding-readiness`
+- `POST /api/knowledge/embedding-smoke-test`
+
+### New UI entry points
+
+- `系统设置 -> LLM 网关联调`
+- `系统设置 -> Embedding 网关联调`
+- `评测运行 -> 本次评测配置`
+
+### Recommended validation flow
+
+1. Configure real `LLM_*` and `EMBEDDING_*` values in `.env`.
+2. Restart the backend service.
+3. Use `系统设置` to run `检查 LLM 网关` and `检查 Embedding 网关`.
+4. Run `执行 LLM 烟雾测试` and `执行 Embedding 烟雾测试`.
+5. Rebuild stale knowledge documents from `知识库管理`.
+6. Rerun `评测运行` and confirm `本次评测配置` has switched to the real models.
+
+### Retrieval-chain hardening in this round
+
+- Query rewrite now happens once at the RAG entry point instead of being repeated inside every retriever.
+- Dense retrieval now loads only the matched `chunk_id` rows from PostgreSQL instead of scanning all chunks in the tenant scope.
+- Lexical retrieval now narrows candidates in the database first, then scores them in Python.
+- `eval_run.metrics` now stores a `provider_snapshot` so every evaluation run can be traced back to the actual LLM, embedding model, and vector store configuration.
+
+### Remaining boundary
+
+- This round implements the gateway integration hooks and verification workflow.
+- If real gateway credentials are missing, the system still falls back to local `deterministic` providers by design.
+- Whether retrieval quality is good enough for enterprise rollout still depends on rerunning evaluation against your real knowledge base and real model gateway.
+
+### Provider notes
+
+- DashScope / 百炼 `text-embedding-v4` currently enforces a maximum embedding batch size of `10`.
+- When you use `https://dashscope.aliyuncs.com/compatible-mode/v1`, set `EMBEDDING_BATCH_SIZE=10` or lower in `.env`.
+- The backend now also caps DashScope embedding batches to `10` automatically, so knowledge reindexing does not fail with a raw upstream batch-size error.

@@ -10,12 +10,57 @@ from app.core.security import AuthContext, require_roles
 from app.db.models.conversation import ChatMessage, ChatSession
 from app.db.models.rag_recall_log import RagRecallLog
 from app.db.session import get_session, init_db
-from app.schemas.chat import ChatAskRequest, ChatAskResponse, CitationPayload, RetrievalTracePayload
+from app.schemas.chat import (
+    ChatAskRequest,
+    ChatAskResponse,
+    CitationPayload,
+    LlmReadinessPayload,
+    LlmSmokeTestPayload,
+    RetrievalTracePayload,
+)
+from app.services.llm.client import check_llm_readiness, run_llm_smoke_test
 from app.services.rag.query_engine import answer_policy_question
 from app.services.system_settings import get_effective_business_settings
 
 
 router = APIRouter(prefix="/api/chat", tags=["chat"])
+
+
+@router.get("/llm-readiness", response_model=LlmReadinessPayload)
+def get_llm_readiness(
+    _: AuthContext = Depends(require_roles("admin", "operator")),
+) -> LlmReadinessPayload:
+    readiness = check_llm_readiness()
+    return LlmReadinessPayload(
+        provider=readiness.provider,
+        model_name=readiness.model_name,
+        configured=readiness.configured,
+        available=readiness.available,
+        status=readiness.status,
+        message=readiness.message,
+        endpoint=readiness.endpoint,
+    )
+
+
+@router.post("/llm-smoke-test", response_model=LlmSmokeTestPayload)
+def post_llm_smoke_test(
+    _: AuthContext = Depends(require_roles("admin", "operator")),
+) -> LlmSmokeTestPayload:
+    result = run_llm_smoke_test()
+    return LlmSmokeTestPayload(
+        provider=result.provider,
+        model_name=result.model_name,
+        configured=result.configured,
+        available=result.available,
+        status=result.status,
+        message=result.message,
+        sample_question=result.sample_question,
+        sample_evidence=result.sample_evidence,
+        answer_preview=result.answer_preview,
+        latency_ms=result.latency_ms,
+        token_usage=result.token_usage,
+        endpoint=result.endpoint,
+    )
 
 
 @router.post("/ask", response_model=ChatAskResponse)

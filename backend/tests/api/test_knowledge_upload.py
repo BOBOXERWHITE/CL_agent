@@ -130,6 +130,29 @@ def test_reindex_endpoint_can_target_only_stale_documents(
     assert payload["document_ids"] == [first_document_id]
 
 
+def test_reindex_endpoint_returns_gateway_error_detail_when_embedding_provider_fails(
+    client,
+    docx_file: bytes,
+    monkeypatch,
+) -> None:
+    upload_response = client.post(
+        "/api/knowledge/upload",
+        data={"tenant_id": "t1", "customer_id": "c1"},
+        files={"file": ("policy.docx", docx_file, DOCX_CONTENT_TYPE)},
+    )
+    assert upload_response.status_code == 202
+
+    monkeypatch.setattr(
+        "app.services.ingestion.pipeline.build_vector_records",
+        lambda chunks: (_ for _ in ()).throw(RuntimeError("embedding gateway request failed (400): batch size invalid")),
+    )
+
+    response = client.post("/api/knowledge/reindex", json={})
+
+    assert response.status_code == 502
+    assert "embedding gateway request failed" in response.json()["detail"]
+
+
 def test_embedding_readiness_endpoint_reports_missing_gateway_config(client, monkeypatch) -> None:
     monkeypatch.setenv("EMBEDDING_PROVIDER", "openai-compatible")
     monkeypatch.delenv("EMBEDDING_API_BASE_URL", raising=False)

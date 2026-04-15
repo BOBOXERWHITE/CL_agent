@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import hashlib
 import math
-from time import perf_counter
 from dataclasses import dataclass
+from time import perf_counter
 
 import httpx
 
@@ -51,6 +51,8 @@ class OpenAICompatibleEmbeddingClient:
         http_client: httpx.Client | None = None,
         batch_size: int = 16,
         max_retries: int = 2,
+        request_dimensions: int | None = None,
+        encoding_format: str | None = None,
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self.api_key = api_key
@@ -58,16 +60,35 @@ class OpenAICompatibleEmbeddingClient:
         self._http_client = http_client or httpx.Client(timeout=30.0)
         self.batch_size = max(1, batch_size)
         self.max_retries = max(0, max_retries)
+        self.request_dimensions = request_dimensions
+        self.encoding_format = (encoding_format or "").strip() or None
 
     def embed_texts(self, texts: list[str], dimension: int) -> list[list[float]]:
         if not texts:
             return []
 
         embeddings: list[list[float]] = []
-        for start in range(0, len(texts), self.batch_size):
-            batch = texts[start : start + self.batch_size]
+        effective_batch_size = self._get_effective_batch_size()
+        for start in range(0, len(texts), effective_batch_size):
+            batch = texts[start : start + effective_batch_size]
             embeddings.extend(self._embed_batch(batch, dimension))
         return embeddings
+
+    def _get_effective_batch_size(self) -> int:
+        if "dashscope.aliyuncs.com" in self.base_url.lower():
+            return min(self.batch_size, 10)
+        return self.batch_size
+
+    def _build_request_payload(self, texts: list[str]) -> dict[str, object]:
+        payload: dict[str, object] = {
+            "model": self.model_name,
+            "input": texts,
+        }
+        if self.request_dimensions is not None:
+            payload["dimensions"] = self.request_dimensions
+        if self.encoding_format:
+            payload["encoding_format"] = self.encoding_format
+        return payload
 
     def _embed_batch(self, texts: list[str], dimension: int) -> list[list[float]]:
         for attempt in range(self.max_retries + 1):
@@ -78,10 +99,7 @@ class OpenAICompatibleEmbeddingClient:
                         "Authorization": f"Bearer {self.api_key}",
                         "Content-Type": "application/json",
                     },
-                    json={
-                        "model": self.model_name,
-                        "input": texts,
-                    },
+                    json=self._build_request_payload(texts),
                 )
                 response.raise_for_status()
                 payload = response.json()
@@ -161,6 +179,53 @@ class EmbeddingSmokeTestResult:
     endpoint: str | None = None
 
 
+def _resolve_embedding_gateway_settings(
+    *,
+    provider: str | None = None,
+    base_url: str | None = None,
+    api_key: str | None = None,
+    model_name: str | None = None,
+    dimension: int | None = None,
+    request_dimensions: int | None = None,
+    encoding_format: str | None = None,
+) -> tuple[str, str, str, str, int, int | None, str | None]:
+    settings = get_settings()
+    return (
+        (provider or settings.embedding_provider).strip().lower(),
+        (base_url or settings.embedding_api_base_url).strip(),
+        (api_key or settings.embedding_api_key).strip(),
+        (model_name or settings.embedding_model_name).strip(),
+        dimension or settings.embedding_dimension,
+        request_dimensions if request_dimensions is not None else settings.embedding_request_dimensions,
+        (encoding_format if encoding_format is not None else settings.embedding_encoding_format).strip() or None,
+    )
+
+
+def _supports_models_endpoint(status_code: int) -> bool:
+    return status_code not in {404, 405, 501}
+
+
+def _probe_embedding_endpoint(
+    *,
+    base_url: str,
+    api_key: str,
+    model_name: str,
+    dimension: int,
+    request_dimensions: int | None,
+    encoding_format: str | None,
+    http_client: httpx.Client,
+) -> None:
+    client = OpenAICompatibleEmbeddingClient(
+        base_url=base_url,
+        api_key=api_key,
+        model_name=model_name,
+        http_client=http_client,
+        request_dimensions=request_dimensions,
+        encoding_format=encoding_format,
+    )
+    client.embed_texts([DEFAULT_SMOKE_TEST_TEXT], dimension)
+
+
 def get_embedding_client() -> DeterministicEmbeddingClient | OpenAICompatibleEmbeddingClient:
     settings = get_settings()
     if (
@@ -174,6 +239,8 @@ def get_embedding_client() -> DeterministicEmbeddingClient | OpenAICompatibleEmb
             model_name=settings.embedding_model_name,
             batch_size=settings.embedding_batch_size,
             max_retries=settings.embedding_max_retries,
+            request_dimensions=settings.embedding_request_dimensions,
+            encoding_format=settings.embedding_encoding_format,
         )
     return DeterministicEmbeddingClient()
 
@@ -185,6 +252,12 @@ def get_active_embedding_profile() -> EmbeddingProfile:
         and settings.embedding_api_base_url
         and settings.embedding_api_key
     ):
+        request_dimension_part = (
+            f"|request_dim={settings.embedding_request_dimensions}"
+            if settings.embedding_request_dimensions is not None
+            else ""
+        )
+        encoding_part = f"|encoding={settings.embedding_encoding_format}" if settings.embedding_encoding_format else ""
         return EmbeddingProfile(
             provider="openai-compatible",
             model_name=settings.embedding_model_name,
@@ -192,6 +265,7 @@ def get_active_embedding_profile() -> EmbeddingProfile:
             profile_key=(
                 f"openai-compatible|{settings.embedding_model_name}|"
                 f"{settings.embedding_dimension}|{settings.embedding_api_base_url}"
+                f"{request_dimension_part}{encoding_part}"
             ),
         )
 
@@ -203,10 +277,36 @@ def get_active_embedding_profile() -> EmbeddingProfile:
     )
 
 
-def check_embedding_readiness(http_client: httpx.Client | None = None) -> EmbeddingReadiness:
-    settings = get_settings()
+def check_embedding_readiness(
+    *,
+    provider: str | None = None,
+    base_url: str | None = None,
+    api_key: str | None = None,
+    model_name: str | None = None,
+    dimension: int | None = None,
+    request_dimensions: int | None = None,
+    encoding_format: str | None = None,
+    http_client: httpx.Client | None = None,
+) -> EmbeddingReadiness:
+    (
+        resolved_provider,
+        resolved_base_url,
+        resolved_api_key,
+        resolved_model_name,
+        resolved_dimension,
+        resolved_request_dimensions,
+        resolved_encoding_format,
+    ) = _resolve_embedding_gateway_settings(
+        provider=provider,
+        base_url=base_url,
+        api_key=api_key,
+        model_name=model_name,
+        dimension=dimension,
+        request_dimensions=request_dimensions,
+        encoding_format=encoding_format,
+    )
 
-    if settings.embedding_provider != "openai-compatible":
+    if resolved_provider != "openai-compatible":
         return EmbeddingReadiness(
             provider="deterministic",
             model_name=DeterministicEmbeddingClient.model_name,
@@ -216,70 +316,176 @@ def check_embedding_readiness(http_client: httpx.Client | None = None) -> Embedd
             message="当前使用本地 deterministic embedding，无需额外连通性检查。",
         )
 
-    if not settings.embedding_api_base_url or not settings.embedding_api_key:
+    if not resolved_base_url or not resolved_api_key:
         return EmbeddingReadiness(
             provider="openai-compatible",
-            model_name=settings.embedding_model_name,
+            model_name=resolved_model_name,
             configured=False,
             available=False,
             status="missing_config",
             message="缺少 EMBEDDING_API_BASE_URL 或 EMBEDDING_API_KEY。",
-            endpoint=settings.embedding_api_base_url or None,
+            endpoint=resolved_base_url or None,
         )
 
     client = http_client or httpx.Client(timeout=5.0)
     try:
         response = client.get(
-            f"{settings.embedding_api_base_url.rstrip('/')}/models",
-            headers={"Authorization": f"Bearer {settings.embedding_api_key}"},
+            f"{resolved_base_url.rstrip('/')}/models",
+            headers={"Authorization": f"Bearer {resolved_api_key}"},
         )
         response.raise_for_status()
+        payload = response.json()
+        model_ids = [
+            str(item.get("id"))
+            for item in payload.get("data", [])
+            if isinstance(item, dict) and item.get("id")
+        ]
+    except httpx.HTTPStatusError as exc:
+        if _supports_models_endpoint(exc.response.status_code):
+            return EmbeddingReadiness(
+                provider="openai-compatible",
+                model_name=resolved_model_name,
+                configured=True,
+                available=False,
+                status="unreachable",
+                message=f"Embedding 网关不可达：{exc}",
+                endpoint=resolved_base_url,
+            )
+
+        try:
+            _probe_embedding_endpoint(
+                base_url=resolved_base_url,
+                api_key=resolved_api_key,
+                model_name=resolved_model_name,
+                dimension=resolved_dimension,
+                request_dimensions=resolved_request_dimensions,
+                encoding_format=resolved_encoding_format,
+                http_client=client,
+            )
+        except Exception as probe_exc:
+            return EmbeddingReadiness(
+                provider="openai-compatible",
+                model_name=resolved_model_name,
+                configured=True,
+                available=False,
+                status="unreachable",
+                message=f"Embedding 网关不可达：/models 不可用，且真实向量探活失败：{probe_exc}",
+                endpoint=resolved_base_url,
+            )
+
+        return EmbeddingReadiness(
+            provider="openai-compatible",
+            model_name=resolved_model_name,
+            configured=True,
+            available=True,
+            status="ready",
+            message=f"Embedding 网关连通正常；/models 不可用，已通过真实向量探活验证 {resolved_model_name}。",
+            endpoint=resolved_base_url,
+        )
     except Exception as exc:
         return EmbeddingReadiness(
             provider="openai-compatible",
-            model_name=settings.embedding_model_name,
+            model_name=resolved_model_name,
             configured=True,
             available=False,
             status="unreachable",
             message=f"Embedding 网关不可达：{exc}",
-            endpoint=settings.embedding_api_base_url,
+            endpoint=resolved_base_url,
         )
 
+    model_hint = (
+        f"；当前模型 {resolved_model_name} 已在网关列表中。"
+        if resolved_model_name in model_ids
+        else f"；当前模型 {resolved_model_name} 未在网关列表中显式返回。"
+    )
     return EmbeddingReadiness(
         provider="openai-compatible",
-        model_name=settings.embedding_model_name,
+        model_name=resolved_model_name,
         configured=True,
         available=True,
         status="ready",
-        message="Embedding 网关连通正常。",
-        endpoint=settings.embedding_api_base_url,
+        message=f"Embedding 网关连通正常{model_hint}",
+        endpoint=resolved_base_url,
     )
 
 
-def run_embedding_smoke_test(sample_text: str = DEFAULT_SMOKE_TEST_TEXT) -> EmbeddingSmokeTestResult:
-    readiness = check_embedding_readiness()
-    if not readiness.configured or not readiness.available:
+def run_embedding_smoke_test(
+    sample_text: str = DEFAULT_SMOKE_TEST_TEXT,
+    *,
+    provider: str | None = None,
+    base_url: str | None = None,
+    api_key: str | None = None,
+    model_name: str | None = None,
+    dimension: int | None = None,
+    request_dimensions: int | None = None,
+    encoding_format: str | None = None,
+    http_client: httpx.Client | None = None,
+) -> EmbeddingSmokeTestResult:
+    (
+        resolved_provider,
+        resolved_base_url,
+        resolved_api_key,
+        resolved_model_name,
+        resolved_dimension,
+        resolved_request_dimensions,
+        resolved_encoding_format,
+    ) = _resolve_embedding_gateway_settings(
+        provider=provider,
+        base_url=base_url,
+        api_key=api_key,
+        model_name=model_name,
+        dimension=dimension,
+        request_dimensions=request_dimensions,
+        encoding_format=encoding_format,
+    )
+
+    if resolved_provider != "openai-compatible":
+        started_at = perf_counter()
+        vector = text_to_embedding(sample_text, resolved_dimension)
         return EmbeddingSmokeTestResult(
-            provider=readiness.provider,
-            model_name=readiness.model_name,
-            configured=readiness.configured,
+            provider="deterministic",
+            model_name=DeterministicEmbeddingClient.model_name,
+            configured=True,
+            available=True,
+            status="ready",
+            message="Embedding 烟雾测试通过。",
+            sample_text=sample_text,
+            latency_ms=round((perf_counter() - started_at) * 1000, 2),
+            vector_dimension=len(vector),
+            endpoint=None,
+        )
+
+    if not resolved_base_url or not resolved_api_key:
+        return EmbeddingSmokeTestResult(
+            provider="openai-compatible",
+            model_name=resolved_model_name,
+            configured=False,
             available=False,
-            status=readiness.status,
-            message=readiness.message,
+            status="missing_config",
+            message="缺少 EMBEDDING_API_BASE_URL 或 EMBEDDING_API_KEY。",
             sample_text=sample_text,
             latency_ms=0.0,
             vector_dimension=0,
-            endpoint=readiness.endpoint,
+            endpoint=resolved_base_url or None,
         )
 
-    settings = get_settings()
+    client = OpenAICompatibleEmbeddingClient(
+        base_url=resolved_base_url,
+        api_key=resolved_api_key,
+        model_name=resolved_model_name,
+        http_client=http_client,
+        batch_size=get_settings().embedding_batch_size,
+        max_retries=get_settings().embedding_max_retries,
+        request_dimensions=resolved_request_dimensions,
+        encoding_format=resolved_encoding_format,
+    )
     started_at = perf_counter()
     try:
-        vector = text_to_embedding(sample_text, settings.embedding_dimension)
+        vector = client.embed_texts([sample_text], resolved_dimension)[0]
     except Exception as exc:
         return EmbeddingSmokeTestResult(
-            provider=readiness.provider,
-            model_name=readiness.model_name,
+            provider="openai-compatible",
+            model_name=resolved_model_name,
             configured=True,
             available=False,
             status="failed",
@@ -287,12 +493,12 @@ def run_embedding_smoke_test(sample_text: str = DEFAULT_SMOKE_TEST_TEXT) -> Embe
             sample_text=sample_text,
             latency_ms=round((perf_counter() - started_at) * 1000, 2),
             vector_dimension=0,
-            endpoint=readiness.endpoint,
+            endpoint=resolved_base_url,
         )
 
     return EmbeddingSmokeTestResult(
-        provider=readiness.provider,
-        model_name=readiness.model_name,
+        provider="openai-compatible",
+        model_name=resolved_model_name,
         configured=True,
         available=True,
         status="ready",
@@ -300,7 +506,7 @@ def run_embedding_smoke_test(sample_text: str = DEFAULT_SMOKE_TEST_TEXT) -> Embe
         sample_text=sample_text,
         latency_ms=round((perf_counter() - started_at) * 1000, 2),
         vector_dimension=len(vector),
-        endpoint=readiness.endpoint,
+        endpoint=resolved_base_url,
     )
 
 

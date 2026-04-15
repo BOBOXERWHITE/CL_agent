@@ -48,8 +48,18 @@ class MilvusVectorStore:
 
     def _ensure_collection(self):
         if self._utility.has_collection(self._collection_name, using="travel_ops"):
-            return self._collection_cls(self._collection_name, using="travel_ops")
+            collection = self._collection_cls(self._collection_name, using="travel_ops")
+            existing_dimension = self._get_embedding_dimension(collection)
+            if existing_dimension in (None, self._embedding_dimension):
+                return collection
 
+            self._release_collection(collection)
+            self._utility.drop_collection(self._collection_name, using="travel_ops")
+            return self._create_collection()
+
+        return self._create_collection()
+
+    def _create_collection(self):
         schema = self._schema_cls(
             fields=[
                 self._field_cls(
@@ -81,6 +91,35 @@ class MilvusVectorStore:
             index_params={"index_type": "AUTOINDEX", "metric_type": "IP"},
         )
         return collection
+
+    @staticmethod
+    def _get_embedding_dimension(collection) -> int | None:
+        schema = getattr(collection, "schema", None)
+        fields = getattr(schema, "fields", None)
+        if not fields:
+            return None
+
+        for field in fields:
+            if getattr(field, "name", None) != "embedding":
+                continue
+
+            params = getattr(field, "params", None) or {}
+            if isinstance(params, dict) and params.get("dim") is not None:
+                return int(params["dim"])
+
+            dim = getattr(field, "dim", None)
+            if dim is not None:
+                return int(dim)
+        return None
+
+    @staticmethod
+    def _release_collection(collection) -> None:
+        release = getattr(collection, "release", None)
+        if callable(release):
+            try:
+                release()
+            except Exception:
+                pass
 
     @staticmethod
     def _escape_literal(value: str) -> str:

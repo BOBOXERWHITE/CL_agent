@@ -60,6 +60,7 @@ def test_eval_runner_separates_answer_correctness_from_citation_hits(monkeypatch
                 answer="北京酒店报销上限为每晚 650 元。",
                 confidence=0.91,
                 citations=[
+                    SimpleNamespace(snippet="其他相关证据"),
                     SimpleNamespace(snippet="北京酒店报销上限为每晚 650 元。"),
                 ],
             ),
@@ -82,7 +83,26 @@ def test_eval_runner_separates_answer_correctness_from_citation_hits(monkeypatch
 
     assert result.metrics["answer_correctness"] == 0.5
     assert result.metrics["citation_hit_rate"] == 1.0
+    assert result.metrics["retrieval_hit_rate"] == 1.0
+    assert result.metrics["retrieval_mrr"] == 0.75
     assert result.metrics["low_confidence_rate"] == 0.5
+    assert result.metrics["answer_pass_rate"] == 0.5
+    assert result.metrics["quality_gate"] == "fail"
+    assert result.metrics["quality_gate_reasons"]
     assert result.details[0]["answer_correct"] is True
+    assert result.details[0]["expected_citation_rank"] == 2
     assert result.details[1]["citation_hit"] is True
     assert result.details[1]["low_confidence"] is True
+
+
+def test_eval_runner_persists_provider_snapshot(seeded_multilingual_policy_chunks: None) -> None:
+    with SessionLocal() as session:
+        dataset = ensure_builtin_eval_dataset(session, dataset_name="zh-policy-smoke")
+
+    result = run_eval(eval_dataset_id=dataset.id)
+
+    provider_snapshot = result.metrics.get("provider_snapshot")
+    assert provider_snapshot is not None
+    assert provider_snapshot["llm_provider"]
+    assert provider_snapshot["embedding_provider"]
+    assert provider_snapshot["vector_store_provider"]
