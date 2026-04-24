@@ -7,7 +7,14 @@ backend/.pytest_cache/
 frontend/node_modules/
 frontend/dist/
 frontend/*.tsbuildinfo
+# Environment files (P1.7)
+# - .env, .env.local, .env.*.local always contain real secrets and must stay local.
+# - .env.example is the committed placeholder template (allow-listed below).
 .env
+.env.local
+.env.*.local
+!.env.example
 frontend/.env
+frontend/.env.local
 ~$*.docx
 .DS_Store

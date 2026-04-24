@@ -7,7 +7,9 @@ from app.services.rag.vector_store import MilvusVectorStore
 
 def test_ensure_collection_recreates_milvus_collection_when_embedding_dimension_changes() -> None:
     class FakeField:
-        def __init__(self, *, name: str, dtype: object, dim: int | None = None, **_: object) -> None:
+        def __init__(
+            self, *, name: str, dtype: object, dim: int | None = None, **_: object
+        ) -> None:
             self.name = name
             self.dtype = dtype
             self.dim = dim
@@ -19,9 +21,11 @@ def test_ensure_collection_recreates_milvus_collection_when_embedding_dimension_
             self.description = description
 
     class FakeCollection:
-        created: "FakeCollection | None" = None
+        created: FakeCollection | None = None
 
-        def __init__(self, name: str, schema: FakeSchema | None = None, using: str | None = None) -> None:
+        def __init__(
+            self, name: str, schema: FakeSchema | None = None, using: str | None = None
+        ) -> None:
             self.name = name
             self.using = using
             self.released = False
@@ -68,7 +72,12 @@ def test_ensure_collection_recreates_milvus_collection_when_embedding_dimension_
     assert FakeCollection.created is collection
     embedding_field = next(field for field in collection.schema.fields if field.name == "embedding")
     assert embedding_field.dim == 1024
+    # P2.8: index switched from AUTOINDEX to HNSW with tuned M / efConstruction.
     assert collection.index_args == (
         "embedding",
-        {"index_type": "AUTOINDEX", "metric_type": "IP"},
+        {
+            "index_type": "HNSW",
+            "metric_type": "IP",
+            "params": {"M": 16, "efConstruction": 200},
+        },
     )

@@ -14,7 +14,9 @@ class CitationRecord:
     score: float
 
 
-def build_citations(records: list[tuple[KnowledgeChunk, KnowledgeDocument, float]]) -> list[CitationRecord]:
+def build_citations(
+    records: list[tuple[KnowledgeChunk, KnowledgeDocument, float]],
+) -> list[CitationRecord]:
     citations: list[CitationRecord] = []
     for chunk, document, score in records:
         snippet = chunk.content.strip()

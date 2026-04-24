@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import re
 
-
 ASCII_TOKEN_PATTERN = re.compile(r"[a-zA-Z0-9]+")
 CJK_SEQUENCE_PATTERN = re.compile(r"[\u4e00-\u9fff]+")
 

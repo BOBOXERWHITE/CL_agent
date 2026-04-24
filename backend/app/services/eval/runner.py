@@ -5,9 +5,9 @@ from uuid import uuid4
 from sqlalchemy import select
 
 from app.db.models.eval import EvalDataset, EvalRun
-from app.db.session import SessionLocal, init_db
-from app.services.system_settings import get_runtime_settings
+from app.db.session import bypass_rls_session, init_db
 from app.services.rag.query_engine import answer_policy_question
+from app.services.system_settings import get_runtime_settings
 
 
 def _safe_ratio(numerator: int, denominator: int) -> float:
@@ -20,7 +20,9 @@ def _normalize_text(value: str) -> str:
     return "".join(value.lower().split())
 
 
-def _matches_expected_answer(answer: str, sample: dict[str, object], citation_matched: bool) -> bool:
+def _matches_expected_answer(
+    answer: str, sample: dict[str, object], citation_matched: bool
+) -> bool:
     expected_keywords = [
         str(item).strip()
         for item in sample.get("expected_answer_keywords", [])
@@ -85,9 +87,7 @@ def _build_eval_detail(
         "answer": result.answer,
         "expected_citation": str(sample["expected_citation"]),
         "expected_answer_keywords": [
-            str(item)
-            for item in sample.get("expected_answer_keywords", [])
-            if str(item).strip()
+            str(item) for item in sample.get("expected_answer_keywords", []) if str(item).strip()
         ],
         "confidence": round(float(result.confidence), 4),
         "citation_hit": citation_matched,
@@ -102,7 +102,7 @@ def _build_eval_detail(
 def run_eval(eval_dataset_id: str) -> EvalRun:
     init_db()
     runtime_settings = get_runtime_settings()
-    with SessionLocal() as session:
+    with bypass_rls_session() as session:
         dataset = session.execute(
             select(EvalDataset).where(EvalDataset.id == eval_dataset_id)
         ).scalar_one()

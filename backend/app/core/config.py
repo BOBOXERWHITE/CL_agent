@@ -1,6 +1,33 @@
+import logging
 import os
 from dataclasses import dataclass
 from functools import lru_cache
+from pathlib import Path
+
+# Load .env files into os.environ before the first get_settings() call.
+# Precedence (Pydantic Settings v2 style):
+#     1. Real environment variables (set by CI / docker / shell) -- always win
+#     2. .env.local  (per-developer secrets, gitignored)
+#     3. .env        (committed template defaults, optional)
+#
+# dotenv is a thin shim: it ONLY loads values for keys that are NOT already
+# set, so CI exports are never overridden by a stray committed .env.
+try:
+    from dotenv import load_dotenv as _load_dotenv
+
+    _BACKEND_DIR = Path(__file__).resolve().parents[2]  # backend/
+    # Order: .env first, .env.local second (load_dotenv does not overwrite
+    # existing keys). To have .env.local take precedence, load it LAST with
+    # override=False -- but that's the opposite of what we want. Instead,
+    # load .env.local first (with override=False), then .env. The first
+    # wins for any given key.
+    _load_dotenv(_BACKEND_DIR / ".env.local", override=False)
+    _load_dotenv(_BACKEND_DIR / ".env", override=False)
+except ImportError:  # pragma: no cover - python-dotenv is a required dep
+    pass
+
+
+_log = logging.getLogger(__name__)
 
 
 def _as_bool(value: str | None, default: bool) -> bool:
@@ -36,6 +63,25 @@ class Settings:
     auth_admin_tokens: tuple[str, ...]
     auth_operator_tokens: tuple[str, ...]
     auth_reviewer_tokens: tuple[str, ...]
+    # JWT config (P1.1). When jwt_enabled is True, get_auth_context validates a
+    # Bearer JWT instead of looking up a static token in the admin/operator/
+    # reviewer lists. jwt_dev_token_endpoint_enabled gates the signing route
+    # ``/api/auth/dev-token`` -- production must set this to False.
+    jwt_enabled: bool
+    jwt_secret_key: str
+    jwt_algorithm: str
+    jwt_issuer: str
+    jwt_audience: str
+    jwt_expire_minutes: int
+    jwt_dev_token_endpoint_enabled: bool
+    # Rate limiting (P1.6) -- disabled by default so unit tests don't trip.
+    # Production turns it on; in-memory backend is good enough for a single
+    # worker, swap to Redis (slowapi's storage_uri) for multi-worker.
+    rate_limit_enabled: bool
+    rate_limit_default: str  # e.g. "60/minute"
+    rate_limit_chat_ask: str  # stricter because each call hits the LLM
+    rate_limit_knowledge_upload: str  # stricter because each call writes MinIO
+    rate_limit_auth_dev_token: str  # stops a curious dev from spam-signing
     database_url: str
     object_storage_provider: str
     object_storage_root: str
@@ -57,6 +103,40 @@ class Settings:
     embedding_max_retries: int
     embedding_request_dimensions: int | None
     embedding_encoding_format: str
+    # Reranker (P2.4). Providers:
+    #   heuristic       (default, no network) - in-process phrase+lexical bonus
+    #   openai-compatible                     - /v1/rerank (Cohere/Jina/智谱 format)
+    reranker_provider: str
+    reranker_model_name: str
+    reranker_api_base_url: str
+    reranker_api_key: str
+    reranker_top_n: int
+    reranker_timeout_seconds: float
+    # Caching (P2.7). Redis-backed when enabled; a no-op backend when
+    # disabled so tests / dev without Redis don't break. Three TTLs
+    # because cache invalidation semantics differ:
+    #   - embedding cache:  ~30d; stable per (model, text)
+    #   - retrieval cache:  ~1h;  stable per (tenant, query, filters)
+    #   - answer cache:     ~10m; user-visible content, shortest ttl
+    cache_enabled: bool
+    cache_redis_url: str
+    cache_embedding_ttl_seconds: int
+    cache_retrieval_ttl_seconds: int
+    cache_answer_ttl_seconds: int
+    # Query rewriting (P2.6). Heuristic alias expansion is always on;
+    # the LLM-driven branches are feature-flagged so CI + dev don't burn
+    # LLM quota on every /api/chat/ask. HyDE = "hypothetical document
+    # embeddings": ask the LLM to generate a plausible answer, then
+    # retrieve against that answer's vector.
+    query_rewrite_llm_enabled: bool
+    query_rewrite_llm_variants: int
+    hyde_enabled: bool
+    # Agent router (P3.2). Three strategies; each falls back to the next:
+    #   llm       — LLM classifies intent (most flexible, costs tokens)
+    #   embedding — compute similarity against intent exemplars (no LLM calls)
+    #   keyword   — substring match against hand-curated lists (legacy default)
+    # Chain: primary → embedding → keyword. Keyword always works.
+    agent_router_provider: str
     chunk_size: int
     chunk_overlap: int
     chat_top_k: int
@@ -72,6 +152,15 @@ class Settings:
     celery_broker_url: str
     celery_result_backend: str
     celery_task_always_eager: bool
+    # P5.1: OTEL settings. Empty ``otel_exporter_otlp_endpoint`` = no-op
+    # tracer (deterministic in-memory span recording, no network).
+    # Setting this to ``http://collector:4318`` enables real OTLP export.
+    otel_service_name: str
+    otel_exporter_otlp_endpoint: str
+    otel_exporter_otlp_headers: str
+    # P5.5: task_run cleanup retention. 0 or negative disables the cron
+    # so dev environments never have rows deleted automatically.
+    task_run_retention_days: int
 
 
 @lru_cache(maxsize=1)
@@ -91,8 +180,26 @@ def get_settings() -> Settings:
         ),
         auth_enabled=_as_bool(os.getenv("AUTH_ENABLED"), default=False),
         auth_admin_tokens=_as_csv_tuple(os.getenv("AUTH_ADMIN_TOKENS"), default=("admin-token",)),
-        auth_operator_tokens=_as_csv_tuple(os.getenv("AUTH_OPERATOR_TOKENS"), default=("operator-token",)),
-        auth_reviewer_tokens=_as_csv_tuple(os.getenv("AUTH_REVIEWER_TOKENS"), default=("reviewer-token",)),
+        auth_operator_tokens=_as_csv_tuple(
+            os.getenv("AUTH_OPERATOR_TOKENS"), default=("operator-token",)
+        ),
+        auth_reviewer_tokens=_as_csv_tuple(
+            os.getenv("AUTH_REVIEWER_TOKENS"), default=("reviewer-token",)
+        ),
+        jwt_enabled=_as_bool(os.getenv("JWT_ENABLED"), default=False),
+        jwt_secret_key=os.getenv("JWT_SECRET_KEY", "dev-only-insecure-change-me").strip(),
+        jwt_algorithm=os.getenv("JWT_ALGORITHM", "HS256").strip(),
+        jwt_issuer=os.getenv("JWT_ISSUER", "travel-ops-copilot").strip(),
+        jwt_audience=os.getenv("JWT_AUDIENCE", "travel-ops-copilot-api").strip(),
+        jwt_expire_minutes=int(os.getenv("JWT_EXPIRE_MINUTES", "60")),
+        jwt_dev_token_endpoint_enabled=_as_bool(
+            os.getenv("JWT_DEV_TOKEN_ENDPOINT_ENABLED"), default=True
+        ),
+        rate_limit_enabled=_as_bool(os.getenv("RATE_LIMIT_ENABLED"), default=False),
+        rate_limit_default=os.getenv("RATE_LIMIT_DEFAULT", "60/minute"),
+        rate_limit_chat_ask=os.getenv("RATE_LIMIT_CHAT_ASK", "20/minute"),
+        rate_limit_knowledge_upload=os.getenv("RATE_LIMIT_KNOWLEDGE_UPLOAD", "10/minute"),
+        rate_limit_auth_dev_token=os.getenv("RATE_LIMIT_AUTH_DEV_TOKEN", "10/minute"),
         database_url=os.getenv(
             "DATABASE_URL",
             "postgresql+psycopg://travel_ops:travel_ops@localhost:5432/travel_ops",
@@ -110,13 +217,30 @@ def get_settings() -> Settings:
         milvus_collection_name=os.getenv("MILVUS_COLLECTION_NAME", "knowledge_chunks"),
         embedding_provider=os.getenv("EMBEDDING_PROVIDER", "deterministic").lower(),
         embedding_model_name=os.getenv("EMBEDDING_MODEL_NAME", "deterministic-hash-embedding"),
-        embedding_api_base_url=os.getenv("EMBEDDING_API_BASE_URL", os.getenv("LLM_API_BASE_URL", "")).strip(),
+        embedding_api_base_url=os.getenv(
+            "EMBEDDING_API_BASE_URL", os.getenv("LLM_API_BASE_URL", "")
+        ).strip(),
         embedding_api_key=os.getenv("EMBEDDING_API_KEY", os.getenv("LLM_API_KEY", "")).strip(),
         embedding_dimension=int(os.getenv("EMBEDDING_DIMENSION", "16")),
         embedding_batch_size=int(os.getenv("EMBEDDING_BATCH_SIZE", "16")),
         embedding_max_retries=int(os.getenv("EMBEDDING_MAX_RETRIES", "2")),
         embedding_request_dimensions=_as_optional_int(os.getenv("EMBEDDING_REQUEST_DIMENSIONS")),
         embedding_encoding_format=os.getenv("EMBEDDING_ENCODING_FORMAT", "float").strip(),
+        reranker_provider=os.getenv("RERANKER_PROVIDER", "heuristic").strip().lower(),
+        reranker_model_name=os.getenv("RERANKER_MODEL_NAME", "").strip(),
+        reranker_api_base_url=os.getenv("RERANKER_API_BASE_URL", "").strip(),
+        reranker_api_key=os.getenv("RERANKER_API_KEY", "").strip(),
+        reranker_top_n=int(os.getenv("RERANKER_TOP_N", "10")),
+        reranker_timeout_seconds=float(os.getenv("RERANKER_TIMEOUT_SECONDS", "5.0")),
+        cache_enabled=_as_bool(os.getenv("CACHE_ENABLED"), default=False),
+        cache_redis_url=os.getenv("CACHE_REDIS_URL", "redis://localhost:6379/2").strip(),
+        cache_embedding_ttl_seconds=int(os.getenv("CACHE_EMBEDDING_TTL_SECONDS", "2592000")),
+        cache_retrieval_ttl_seconds=int(os.getenv("CACHE_RETRIEVAL_TTL_SECONDS", "3600")),
+        cache_answer_ttl_seconds=int(os.getenv("CACHE_ANSWER_TTL_SECONDS", "600")),
+        agent_router_provider=os.getenv("AGENT_ROUTER_PROVIDER", "keyword").strip().lower(),
+        query_rewrite_llm_enabled=_as_bool(os.getenv("QUERY_REWRITE_LLM_ENABLED"), default=False),
+        query_rewrite_llm_variants=int(os.getenv("QUERY_REWRITE_LLM_VARIANTS", "2")),
+        hyde_enabled=_as_bool(os.getenv("HYDE_ENABLED"), default=False),
         chunk_size=int(os.getenv("CHUNK_SIZE", "450")),
         chunk_overlap=int(os.getenv("CHUNK_OVERLAP", "1")),
         chat_top_k=int(os.getenv("CHAT_TOP_K", "3")),
@@ -132,4 +256,8 @@ def get_settings() -> Settings:
         celery_broker_url=os.getenv("CELERY_BROKER_URL", "redis://localhost:6379/0"),
         celery_result_backend=os.getenv("CELERY_RESULT_BACKEND", "redis://localhost:6379/1"),
         celery_task_always_eager=_as_bool(os.getenv("CELERY_TASK_ALWAYS_EAGER"), default=True),
+        otel_service_name=os.getenv("OTEL_SERVICE_NAME", "travel-ops-copilot"),
+        otel_exporter_otlp_endpoint=os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT", "").strip(),
+        otel_exporter_otlp_headers=os.getenv("OTEL_EXPORTER_OTLP_HEADERS", "").strip(),
+        task_run_retention_days=int(os.getenv("TASK_RUN_RETENTION_DAYS") or "90"),
     )

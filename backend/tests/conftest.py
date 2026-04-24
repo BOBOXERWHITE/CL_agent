@@ -15,8 +15,7 @@ DOCX_CONTENT_TYPE = "application/vnd.openxmlformats-officedocument.wordprocessin
 
 def _build_docx_file(paragraphs: list[str]) -> bytes:
     paragraph_xml = "\n".join(
-        f"    <w:p><w:r><w:t>{paragraph}</w:t></w:r></w:p>"
-        for paragraph in paragraphs
+        f"    <w:p><w:r><w:t>{paragraph}</w:t></w:r></w:p>" for paragraph in paragraphs
     )
     document_xml = f"""<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
@@ -50,7 +49,16 @@ def _build_docx_file(paragraphs: list[str]) -> bytes:
 
 
 @pytest.fixture(autouse=True)
-def _test_environment(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+def _test_environment(
+    request: pytest.FixtureRequest,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    # Integration tests manage their own environment (real PG + real MinIO via
+    # testcontainers). Skip the lightweight SQLite defaults for them.
+    if request.node.get_closest_marker("integration"):
+        return
+
     database_path = tmp_path / "travel_ops.db"
     storage_root = tmp_path / "object-store"
 
@@ -70,6 +78,11 @@ def client(_test_environment: None) -> Iterator[TestClient]:
 
     app = create_app()
     with TestClient(app) as test_client:
+        # P1.1 removed the ``auth_enabled=false`` admin bypass. Tests now
+        # authenticate with the default static admin token; individual tests
+        # that need a specific role can override via ``client.headers`` or
+        # pass per-request ``headers=...``.
+        test_client.headers.update({"Authorization": "Bearer admin-token"})
         yield test_client
 
     from app.core.config import get_settings

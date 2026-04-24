@@ -8,7 +8,6 @@ from sqlalchemy.orm import Session
 
 from app.db.models.rule import PolicyRule, ReviewCase
 
-
 DEFAULT_RULES = (
     {
         "rule_code": "hotel_amount_tier_1",
@@ -161,7 +160,21 @@ def create_review_case(
     reason: str,
     payload: dict[str, object],
     rule_result: RuleEvaluationResult | None = None,
+    agent_run_id: str | None = None,
 ) -> ReviewCase:
+    """Create a ReviewCase row.
+
+    P5.4: ``agent_run_id`` is now an explicit FK column rather than
+    buried in ``payload_json``. We still copy it into payload_json for
+    a deprecation window so existing queries don't break on day one.
+    """
+    # If the caller didn't pass agent_run_id explicitly but embedded it
+    # in payload, lift it up — keeps old call sites working unchanged.
+    resolved_agent_run_id = agent_run_id or (
+        str(payload["agent_run_id"])
+        if isinstance(payload, dict) and payload.get("agent_run_id")
+        else None
+    )
     review_case = ReviewCase(
         id=str(uuid4()),
         source=source,
@@ -173,6 +186,7 @@ def create_review_case(
         suggested_action="转人工复核",
         payload_json=payload,
         rule_result_json=rule_result.as_dict() if rule_result else {},
+        agent_run_id=resolved_agent_run_id,
     )
     session.add(review_case)
     session.commit()
@@ -190,6 +204,4 @@ def should_create_review_case(
         return True
     if confidence < 0.6:
         return True
-    if rule_result and rule_result.decision != "approved":
-        return True
-    return False
+    return bool(rule_result and rule_result.decision != "approved")

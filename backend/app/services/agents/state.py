@@ -2,7 +2,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from app.services.agents.engine import TimelineEvent
 
 
 def utcnow() -> datetime:
@@ -53,3 +56,10 @@ class AgentExecutionResult:
     output: dict[str, Any]
     timeline: list[TimelineStep]
     tool_calls: list[ToolCallRecord]
+    # P3.7: structured engine events carried through to the route so the
+    # ``agent_event`` table gets populated inside the same transaction as
+    # ``AgentRun``. Empty when the underlying agent is still on the pre-P3.1
+    # code path (e.g. anomaly / ticket_router) or when no events were
+    # produced. The route treats the list as the source of truth for
+    # structured event replay; ``timeline`` stays as the legacy display view.
+    engine_events: list[TimelineEvent] = field(default_factory=list)

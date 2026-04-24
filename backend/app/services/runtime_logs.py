@@ -7,7 +7,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.db.models.runtime_log import RuntimeLog
-from app.db.session import SessionLocal
+from app.db.session import bypass_rls_session
 
 
 def create_runtime_log(
@@ -25,7 +25,15 @@ def create_runtime_log(
     token_usage: dict[str, int] | None = None,
     error_message: str | None = None,
 ) -> None:
-    with SessionLocal() as session:
+    # P7.2: redact PII from error_message before persisting. Error
+    # traces often echo back user input (404 with the path they hit,
+    # 422 with the bad value they sent). Running every string field
+    # through the regex layer is cheap — empty / short strings exit
+    # fast.
+    from app.core.guardrails.redaction import redact_text
+
+    safe_error = redact_text(error_message) if error_message else error_message
+    with bypass_rls_session() as session:
         session.add(
             RuntimeLog(
                 id=str(uuid4()),
@@ -40,7 +48,7 @@ def create_runtime_log(
                 user_role=user_role,
                 model_name=model_name,
                 token_usage_json=token_usage or {},
-                error_message=error_message,
+                error_message=safe_error,
             )
         )
         session.commit()

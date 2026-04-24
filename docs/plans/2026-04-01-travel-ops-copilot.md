@@ -1144,8 +1144,3 @@ git commit -m "feat: add model gateway with deterministic fallback"
 - `hybrid retrieval` 使用 RRF 融合并通过回归测试。
 - 评测结果能够返回 `quality_gate` 与排序类指标。
 - 迭代文档、README 和实现保持一致。
-
-
-
-
-

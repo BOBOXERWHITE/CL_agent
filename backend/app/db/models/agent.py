@@ -28,9 +28,11 @@ class AgentRun(Base):
     output_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     timeline_json: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
-    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow
+    )
 
-    tool_calls: Mapped[list["ToolCallLog"]] = relationship(
+    tool_calls: Mapped[list[ToolCallLog]] = relationship(
         back_populates="agent_run",
         cascade="all, delete-orphan",
         order_by="ToolCallLog.created_at",

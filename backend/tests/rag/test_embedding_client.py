@@ -5,7 +5,10 @@ from types import SimpleNamespace
 
 import httpx
 
-from app.services.rag.embedding_client import OpenAICompatibleEmbeddingClient, check_embedding_readiness
+from app.services.rag.embedding_client import (
+    OpenAICompatibleEmbeddingClient,
+    check_embedding_readiness,
+)
 from app.services.rag.index_builder import build_vector_records
 
 
@@ -175,7 +178,9 @@ def test_openai_compatible_embedding_client_retries_retryable_gateway_failure() 
     assert vectors == [[0.1, 0.2, 0.3, 0.4]]
 
 
-def test_check_embedding_readiness_falls_back_to_embedding_probe_when_models_endpoint_is_unsupported() -> None:
+def test_check_embedding_readiness_falls_back_to_embedding_probe_when_models_endpoint_is_unsupported() -> (
+    None
+):
     calls: list[str] = []
 
     def handler(request: httpx.Request) -> httpx.Response:

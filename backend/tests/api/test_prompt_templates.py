@@ -64,16 +64,20 @@ def test_policy_answer_persists_retrieval_trace_log(client, seeded_policy_chunks
     assert response.status_code == 200
 
     with SessionLocal() as session:
-        row = session.execute(
-            text(
-                """
+        row = (
+            session.execute(
+                text(
+                    """
                 SELECT question, model_name, prompt_name, citation_count, trace_json
                 FROM rag_recall_log
                 ORDER BY created_at DESC
                 LIMIT 1
                 """
+                )
             )
-        ).mappings().one()
+            .mappings()
+            .one()
+        )
 
     assert row["question"] == "Can I book business class?"
     assert row["model_name"]

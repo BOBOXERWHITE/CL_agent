@@ -6,10 +6,15 @@ from sqlalchemy.orm import Session
 
 from app.core.security import AuthContext, require_roles
 from app.db.models.rule import PolicyRule
-from app.db.session import get_session, init_db
-from app.schemas.rule import PolicyRuleListResponse, PolicyRulePayload, RuleEvaluationRequest, RuleEvaluationResponse, RuleHitPayload
-from app.services.rules.engine import RuleEvaluationInput, evaluate_rules, seed_default_rules
-
+from app.db.session import get_session
+from app.schemas.rule import (
+    PolicyRuleListResponse,
+    PolicyRulePayload,
+    RuleEvaluationRequest,
+    RuleEvaluationResponse,
+    RuleHitPayload,
+)
+from app.services.rules.engine import RuleEvaluationInput, evaluate_rules
 
 router = APIRouter(prefix="/api/rules", tags=["rules"])
 
@@ -19,8 +24,6 @@ def list_rules(
     _: AuthContext = Depends(require_roles("admin", "operator", "reviewer")),
     session: Session = Depends(get_session),
 ) -> PolicyRuleListResponse:
-    init_db()
-    seed_default_rules(session)
     rows = session.execute(select(PolicyRule).order_by(PolicyRule.rule_code.asc())).scalars()
     return PolicyRuleListResponse(
         items=[
@@ -57,5 +60,7 @@ def evaluate_rule_payload(
         decision=result.decision,
         reason=result.reason,
         suggested_action=result.suggested_action,
-        rule_hits=[RuleHitPayload.model_validate(rule_hit.as_dict()) for rule_hit in result.rule_hits],
+        rule_hits=[
+            RuleHitPayload.model_validate(rule_hit.as_dict()) for rule_hit in result.rule_hits
+        ],
     )

@@ -6,7 +6,12 @@ from app.db.models.knowledge import KnowledgeChunk, KnowledgeDocument
 from app.db.session import SessionLocal
 from app.services.rag import retrievers as retrievers_module
 from app.services.rag.query_rewriter import rewrite_query
-from app.services.rag.retrievers import RetrievalHit, fuse_ranked_hits, retrieve_dense, retrieve_hybrid
+from app.services.rag.retrievers import (
+    RetrievalHit,
+    fuse_ranked_hits,
+    retrieve_dense,
+    retrieve_hybrid,
+)
 
 
 def test_hybrid_retrieval_prefers_exact_policy_keyword_matches(
@@ -80,7 +85,9 @@ def test_retrieve_dense_uses_targeted_chunk_loading(
         targeted_calls.append(chunk_ids)
         return [(chunk, document)]
 
-    monkeypatch.setattr(retrievers_module, "_load_chunks_by_ids", fake_load_chunks_by_ids, raising=False)
+    monkeypatch.setattr(
+        retrievers_module, "_load_chunks_by_ids", fake_load_chunks_by_ids, raising=False
+    )
 
     hits = retrieve_dense("北京酒店报销上限是多少？", "t1", "c1", 3)
 

@@ -8,7 +8,9 @@ from fastapi.testclient import TestClient
 
 
 @pytest.fixture()
-def secured_client(monkeypatch: pytest.MonkeyPatch, _test_environment: None) -> Iterator[TestClient]:
+def secured_client(
+    monkeypatch: pytest.MonkeyPatch, _test_environment: None
+) -> Iterator[TestClient]:
     monkeypatch.setenv("AUTH_ENABLED", "true")
     monkeypatch.setenv("AUTH_ADMIN_TOKENS", "admin-token")
     monkeypatch.setenv("AUTH_OPERATOR_TOKENS", "operator-token")
@@ -38,7 +40,9 @@ def test_runtime_logs_capture_success_and_failure_requests(secured_client: TestC
     health_response = secured_client.get("/health", headers={"Authorization": "Bearer admin-token"})
     assert health_response.status_code == 200
 
-    error_response = secured_client.get("/test-error", headers={"Authorization": "Bearer admin-token"})
+    error_response = secured_client.get(
+        "/test-error", headers={"Authorization": "Bearer admin-token"}
+    )
     assert error_response.status_code == 500
 
     list_response = secured_client.get(

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
+import logging
 import math
 from dataclasses import dataclass
 from time import perf_counter
@@ -10,8 +12,21 @@ import httpx
 from app.core.config import get_settings
 from app.services.rag.text_processing import build_search_terms
 
-
 DEFAULT_SMOKE_TEST_TEXT = "北京酒店报销上限"
+
+_log = logging.getLogger(__name__)
+
+
+class EmbeddingConfigError(RuntimeError):
+    """Raised when the embedding client is misconfigured.
+
+    P2.1 change: we no longer silently fall back to the deterministic
+    hash embedding when ``EMBEDDING_PROVIDER=openai-compatible`` is set
+    but the API base URL or key is missing. That silent fallback used to
+    produce non-semantic vectors in production while looking healthy;
+    now we fail fast at first use so the operator sees the problem
+    immediately.
+    """
 
 
 def _deterministic_embedding(text: str, dimension: int) -> list[float]:
@@ -39,6 +54,15 @@ class DeterministicEmbeddingClient:
 
     def embed_texts(self, texts: list[str], dimension: int) -> list[list[float]]:
         return [_deterministic_embedding(text, dimension) for text in texts]
+
+    async def embed_texts_async(self, texts: list[str], dimension: int) -> list[list[float]]:
+        """Async twin of :meth:`embed_texts`.
+
+        The deterministic implementation is pure CPU (no IO) — we keep
+        the signature async so the hot-path ``texts_to_embeddings_async``
+        doesn't have to branch on which provider it got.
+        """
+        return self.embed_texts(texts, dimension)
 
 
 class OpenAICompatibleEmbeddingClient:
@@ -74,6 +98,37 @@ class OpenAICompatibleEmbeddingClient:
             embeddings.extend(self._embed_batch(batch, dimension))
         return embeddings
 
+    async def embed_texts_async(
+        self,
+        texts: list[str],
+        dimension: int,
+        *,
+        async_client: httpx.AsyncClient | None = None,
+    ) -> list[list[float]]:
+        """Async twin of :meth:`embed_texts` (P4.1).
+
+        Identical batching + retry semantics, but every HTTP call is
+        ``await``-ed so concurrent requests on the same FastAPI worker
+        don't serialise the event loop. ``async_client`` is injectable
+        for tests; production callers leave it ``None`` and pick up the
+        shared client from ``app.services.rag.async_http_client``.
+        """
+        if not texts:
+            return []
+
+        client = async_client
+        if client is None:
+            from app.services.rag.async_http_client import get_async_http_client
+
+            client = get_async_http_client()
+
+        embeddings: list[list[float]] = []
+        effective_batch_size = self._get_effective_batch_size()
+        for start in range(0, len(texts), effective_batch_size):
+            batch = texts[start : start + effective_batch_size]
+            embeddings.extend(await self._embed_batch_async(batch, dimension, client))
+        return embeddings
+
     def _get_effective_batch_size(self) -> int:
         if "dashscope.aliyuncs.com" in self.base_url.lower():
             return min(self.batch_size, 10)
@@ -105,7 +160,9 @@ class OpenAICompatibleEmbeddingClient:
                 payload = response.json()
                 return self._parse_embeddings(payload, texts, dimension)
             except httpx.HTTPStatusError as exc:
-                if attempt < self.max_retries and self._is_retryable_status(exc.response.status_code):
+                if attempt < self.max_retries and self._is_retryable_status(
+                    exc.response.status_code
+                ):
                     continue
                 raise RuntimeError(self._build_gateway_error(exc)) from exc
             except httpx.RequestError as exc:
@@ -117,7 +174,9 @@ class OpenAICompatibleEmbeddingClient:
 
         raise RuntimeError("embedding gateway request failed without a recoverable error")
 
-    def _parse_embeddings(self, payload: dict[str, object], texts: list[str], dimension: int) -> list[list[float]]:
+    def _parse_embeddings(
+        self, payload: dict[str, object], texts: list[str], dimension: int
+    ) -> list[list[float]]:
         data = sorted(payload.get("data", []), key=lambda item: item.get("index", 0))
         embeddings = [list(map(float, item["embedding"])) for item in data]
         if len(embeddings) != len(texts):
@@ -126,6 +185,50 @@ class OpenAICompatibleEmbeddingClient:
             if len(embedding) != dimension:
                 raise ValueError("embedding dimension mismatch")
         return embeddings
+
+    async def _embed_batch_async(
+        self,
+        texts: list[str],
+        dimension: int,
+        client: httpx.AsyncClient,
+    ) -> list[list[float]]:
+        """Async version of :meth:`_embed_batch`.
+
+        Retry ladder mirrors the sync path: N retries, exponential
+        ``asyncio.sleep`` backoff instead of the sync's tight loop.
+        Keeping the two paths behaviourally identical is the whole
+        point — worker and FastAPI route should see the same outcome
+        for the same failure.
+        """
+        for attempt in range(self.max_retries + 1):
+            try:
+                response = await client.post(
+                    f"{self.base_url}/embeddings",
+                    headers={
+                        "Authorization": f"Bearer {self.api_key}",
+                        "Content-Type": "application/json",
+                    },
+                    json=self._build_request_payload(texts),
+                )
+                response.raise_for_status()
+                payload = response.json()
+                return self._parse_embeddings(payload, texts, dimension)
+            except httpx.HTTPStatusError as exc:
+                if attempt < self.max_retries and self._is_retryable_status(
+                    exc.response.status_code
+                ):
+                    await asyncio.sleep(2**attempt * 0.1)
+                    continue
+                raise RuntimeError(self._build_gateway_error(exc)) from exc
+            except httpx.RequestError as exc:
+                if attempt < self.max_retries:
+                    await asyncio.sleep(2**attempt * 0.1)
+                    continue
+                raise RuntimeError(
+                    f"embedding gateway request failed for model {self.model_name} via {self.base_url}/embeddings: {exc}"
+                ) from exc
+
+        raise RuntimeError("embedding gateway request failed without a recoverable error")
 
     @staticmethod
     def _is_retryable_status(status_code: int) -> bool:
@@ -196,8 +299,13 @@ def _resolve_embedding_gateway_settings(
         (api_key or settings.embedding_api_key).strip(),
         (model_name or settings.embedding_model_name).strip(),
         dimension or settings.embedding_dimension,
-        request_dimensions if request_dimensions is not None else settings.embedding_request_dimensions,
-        (encoding_format if encoding_format is not None else settings.embedding_encoding_format).strip() or None,
+        request_dimensions
+        if request_dimensions is not None
+        else settings.embedding_request_dimensions,
+        (
+            encoding_format if encoding_format is not None else settings.embedding_encoding_format
+        ).strip()
+        or None,
     )
 
 
@@ -227,12 +335,43 @@ def _probe_embedding_endpoint(
 
 
 def get_embedding_client() -> DeterministicEmbeddingClient | OpenAICompatibleEmbeddingClient:
+    """Return the configured embedding client or raise if misconfigured.
+
+    Provider matrix:
+
+    +-------------------------+------------------------------------------+
+    | EMBEDDING_PROVIDER      | Behaviour                                |
+    +=========================+==========================================+
+    | deterministic (default) | Hash-BoW local client. Only meaningful   |
+    |                         | for unit tests; produces non-semantic    |
+    |                         | vectors, so retrieval is near-random.    |
+    +-------------------------+------------------------------------------+
+    | openai-compatible       | HTTP client against any /v1/embeddings   |
+    |                         | endpoint. Requires EMBEDDING_API_BASE_URL|
+    |                         | AND EMBEDDING_API_KEY; missing either    |
+    |                         | raises EmbeddingConfigError rather than  |
+    |                         | falling back silently (P2.1 change).     |
+    +-------------------------+------------------------------------------+
+
+    The previous silent-fallback behaviour is preserved only when the
+    provider is left at ``deterministic``; explicit ``openai-compatible``
+    is treated as a hard commitment.
+    """
     settings = get_settings()
-    if (
-        settings.embedding_provider == "openai-compatible"
-        and settings.embedding_api_base_url
-        and settings.embedding_api_key
-    ):
+    provider = settings.embedding_provider.strip().lower()
+    if provider == "openai-compatible":
+        missing: list[str] = []
+        if not settings.embedding_api_base_url:
+            missing.append("EMBEDDING_API_BASE_URL")
+        if not settings.embedding_api_key:
+            missing.append("EMBEDDING_API_KEY")
+        if missing:
+            raise EmbeddingConfigError(
+                "EMBEDDING_PROVIDER=openai-compatible but required config is missing: "
+                + ", ".join(missing)
+                + ". Set these env vars or switch EMBEDDING_PROVIDER=deterministic "
+                "(tests only). See backend/.env.example for the full template."
+            )
         return OpenAICompatibleEmbeddingClient(
             base_url=settings.embedding_api_base_url,
             api_key=settings.embedding_api_key,
@@ -257,7 +396,11 @@ def get_active_embedding_profile() -> EmbeddingProfile:
             if settings.embedding_request_dimensions is not None
             else ""
         )
-        encoding_part = f"|encoding={settings.embedding_encoding_format}" if settings.embedding_encoding_format else ""
+        encoding_part = (
+            f"|encoding={settings.embedding_encoding_format}"
+            if settings.embedding_encoding_format
+            else ""
+        )
         return EmbeddingProfile(
             provider="openai-compatible",
             model_name=settings.embedding_model_name,
@@ -511,8 +654,112 @@ def run_embedding_smoke_test(
 
 
 def texts_to_embeddings(texts: list[str], dimension: int) -> list[list[float]]:
-    return get_embedding_client().embed_texts(texts, dimension)
+    """Embed ``texts`` with a best-effort cache read / write (P2.7 接入).
+
+    Per-text cache: key = ``emb:{model}:{sha256(text)[:32]}``. Missing
+    entries are computed by the provider in one batched call; the whole
+    batch is written back. Cache misses are treated as slow paths, not
+    errors -- any cache exception degrades to "no cache for this call".
+
+    The model name is part of the key so rotating ``EMBEDDING_MODEL_NAME``
+    (e.g. text-embedding-3-small → bge-m3) does not serve stale vectors.
+    """
+    if not texts:
+        return []
+
+    from app.core.cache import embedding_cache_key, get_cache
+
+    profile = get_active_embedding_profile()
+    cache = get_cache()
+    settings = get_settings()
+
+    keys: list[str] = [embedding_cache_key(profile.model_name, t) for t in texts]
+    cached: list[list[float] | None] = []
+    miss_indices: list[int] = []
+    for idx, key in enumerate(keys):
+        try:
+            hit = cache.get(key)
+        except Exception:
+            hit = None
+        if (
+            isinstance(hit, list)
+            and len(hit) == dimension
+            and all(isinstance(v, int | float) for v in hit)
+        ):
+            cached.append([float(v) for v in hit])
+        else:
+            cached.append(None)
+            miss_indices.append(idx)
+
+    if miss_indices:
+        miss_texts = [texts[i] for i in miss_indices]
+        fresh = get_embedding_client().embed_texts(miss_texts, dimension)
+        for slot, vector in zip(miss_indices, fresh, strict=True):
+            cached[slot] = vector
+            try:
+                cache.set(keys[slot], vector, ttl_seconds=settings.cache_embedding_ttl_seconds)
+            except Exception:
+                pass
+
+    # Every slot is filled by this point (either cache hit or fresh result).
+    return [vector for vector in cached if vector is not None]
 
 
 def text_to_embedding(text: str, dimension: int) -> list[float]:
     return texts_to_embeddings([text], dimension)[0]
+
+
+async def texts_to_embeddings_async(texts: list[str], dimension: int) -> list[list[float]]:
+    """Async twin of :func:`texts_to_embeddings` (P4.1).
+
+    Cache semantics are identical — hits are read synchronously (Redis
+    client in this codebase is sync, which is fine: ``cache.get`` is
+    microseconds), misses are batched and embedded via the provider's
+    async API. Only the network IO is awaited; the surrounding glue is
+    unchanged so behaviour matches the sync helper byte-for-byte.
+    """
+    if not texts:
+        return []
+
+    from app.core.cache import embedding_cache_key, get_cache
+
+    profile = get_active_embedding_profile()
+    cache = get_cache()
+    settings = get_settings()
+
+    keys: list[str] = [embedding_cache_key(profile.model_name, t) for t in texts]
+    cached: list[list[float] | None] = []
+    miss_indices: list[int] = []
+    for idx, key in enumerate(keys):
+        try:
+            hit = cache.get(key)
+        except Exception:
+            hit = None
+        if (
+            isinstance(hit, list)
+            and len(hit) == dimension
+            and all(isinstance(v, int | float) for v in hit)
+        ):
+            cached.append([float(v) for v in hit])
+        else:
+            cached.append(None)
+            miss_indices.append(idx)
+
+    if miss_indices:
+        miss_texts = [texts[i] for i in miss_indices]
+        client = get_embedding_client()
+        fresh = await client.embed_texts_async(miss_texts, dimension)
+        for slot, vector in zip(miss_indices, fresh, strict=True):
+            cached[slot] = vector
+            try:
+                cache.set(keys[slot], vector, ttl_seconds=settings.cache_embedding_ttl_seconds)
+            except Exception:
+                pass
+
+    return [vector for vector in cached if vector is not None]
+
+
+async def text_to_embedding_async(text: str, dimension: int) -> list[float]:
+    """Async single-text convenience; delegates to :func:`texts_to_embeddings_async`."""
+    vectors = await texts_to_embeddings_async([text], dimension)
+    return vectors[0]

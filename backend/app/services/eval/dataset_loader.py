@@ -7,7 +7,6 @@ from sqlalchemy.orm import Session
 
 from app.db.models.eval import EvalDataset
 
-
 BUILTIN_DATASETS: dict[str, dict[str, object]] = {
     "zh-policy-smoke": {
         "description": "中文与中英混合差旅政策问答冒烟评测集",
@@ -39,7 +38,9 @@ BUILTIN_DATASETS: dict[str, dict[str, object]] = {
 
 
 def ensure_builtin_eval_dataset(session: Session, dataset_name: str) -> EvalDataset:
-    dataset = session.execute(select(EvalDataset).where(EvalDataset.name == dataset_name)).scalar_one_or_none()
+    dataset = session.execute(
+        select(EvalDataset).where(EvalDataset.name == dataset_name)
+    ).scalar_one_or_none()
     if dataset is not None:
         return dataset
 

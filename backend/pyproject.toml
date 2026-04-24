@@ -8,14 +8,19 @@ version = "0.1.0"
 description = "Backend for Travel Ops Copilot"
 requires-python = ">=3.13"
 dependencies = [
+  "alembic>=1.13,<2.0",
   "celery>=5.5,<6.0",
   "fastapi>=0.116,<1.0",
   "httpx>=0.28,<1.0",
   "minio>=7.2,<8.0",
   "prometheus-client>=0.22,<1.0",
   "psycopg[binary]>=3.2,<4.0",
+  "pyjwt>=2.9,<3.0",
   "pymilvus>=2.5,<3.0",
+  "redis>=5.0,<7.0",
+  "slowapi>=0.1.9,<1.0",
   "pypdf>=5.4,<6.0",
+  "python-dotenv>=1.0,<2.0",
   "python-multipart>=0.0.20,<1.0",
   "sqlalchemy>=2.0,<3.0",
   "uvicorn>=0.35,<1.0"
@@ -23,9 +28,93 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = [
-  "pytest>=8.4,<9.0"
+  "pytest>=8.4,<9.0",
+  "pytest-asyncio>=0.24,<1.0",
+  "testcontainers[postgres,minio]>=4.9,<5.0",
+  "ruff>=0.6,<1.0",
+  "mypy>=1.11,<2.0",
+  "pre-commit>=4.0,<5.0"
+]
+# P5-patch-C: install with ``pip install -e .[otel]`` in production.
+# When the endpoint env is set, ``init_otel_tracer`` wires the real
+# SDK; when these packages aren't installed, the import fails
+# gracefully and we stay on the no-op layer.
+otel = [
+  "opentelemetry-sdk>=1.29,<2.0",
+  "opentelemetry-exporter-otlp-proto-http>=1.29,<2.0"
 ]
 
 [tool.pytest.ini_options]
 pythonpath = ["."]
 testpaths = ["tests"]
+markers = [
+  "integration: end-to-end test that requires Docker (Postgres + MinIO) or Milvus Lite; slow",
+  "unit: in-process test using SQLite + noop adapters; fast (default)"
+]
+# Integration tests are opt-in: run `pytest -m integration` or `make test-integration`.
+# Default `pytest` still runs only fast unit tests so CI stays green without Docker.
+addopts = "-m 'not integration'"
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+
+[tool.ruff]
+line-length = 100
+target-version = "py313"
+extend-exclude = ["alembic/versions/*.py", ".venv", "build", "dist"]
+
+[tool.ruff.lint]
+# Curated rule set: stylistic (E/W), pyflakes (F), imports (I), naming (N),
+# modernization (UP), bugbear (B), comprehensions (C4), simplifications (SIM),
+# return-statement hygiene (RET), ruff's own (RUF).
+select = ["E", "F", "W", "I", "N", "UP", "B", "C4", "SIM", "RET", "RUF"]
+ignore = [
+  "E501",   # let the formatter manage line length
+  "B008",   # FastAPI/SQLAlchemy depends patterns legitimately default-call
+  "N802",   # SessionLocal (PascalCase callable) is deliberate
+  "N818",   # "AppException" base name is idiomatic; Error suffix is a style preference
+  "SIM105", # contextlib.suppress is not always clearer than try/except/pass
+  "RUF001", # Chinese punctuation in strings is intentional
+  "RUF002",
+  "RUF003"
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["N803", "N806", "SIM117", "B018"]
+"alembic/env.py" = ["E402"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+
+[tool.mypy]
+# Phase 0 intentionally uses the non-strict preset. The codebase has 46
+# pre-existing strict violations that are scheduled for per-module cleanup in
+# Phase 1 parallel work — turning on strict today would block every commit on
+# unrelated work. Targeted checks below still catch the high-value classes of
+# bugs (returning wrong types, implicit Optional, any-leakage in generics).
+python_version = "3.13"
+warn_unused_configs = true
+warn_return_any = true
+warn_unused_ignores = true
+warn_redundant_casts = true
+disallow_any_generics = true
+no_implicit_optional = true
+show_error_codes = true
+files = ["app"]
+exclude = ["tests", "alembic/versions"]
+follow_imports = "silent"
+ignore_missing_imports = true
+
+# Third-party libs without type stubs: silence import errors so the app code
+# itself can remain strict.
+[[tool.mypy.overrides]]
+module = [
+  "celery.*",
+  "pymilvus.*",
+  "minio.*",
+  "prometheus_client.*",
+  "httpx.*",
+  "alembic.*",
+  "testcontainers.*"
+]
+ignore_missing_imports = true

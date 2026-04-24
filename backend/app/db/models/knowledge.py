@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-from datetime import datetime, UTC
+from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import DateTime, ForeignKey, Integer, JSON, String, Text
+from sqlalchemy import JSON, DateTime, ForeignKey, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base
@@ -35,7 +35,7 @@ class KnowledgeDocument(Base):
         onupdate=utcnow,
     )
 
-    chunks: Mapped[list["KnowledgeChunk"]] = relationship(
+    chunks: Mapped[list[KnowledgeChunk]] = relationship(
         back_populates="document",
         cascade="all, delete-orphan",
         order_by="KnowledgeChunk.chunk_index",

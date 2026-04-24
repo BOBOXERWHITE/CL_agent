@@ -21,7 +21,9 @@ class EvalDataset(Base):
     description: Mapped[str] = mapped_column(Text, default="")
     samples_json: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
-    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow
+    )
 
 
 class EvalRun(Base):
@@ -34,15 +36,13 @@ class EvalRun(Base):
     question_count: Mapped[int] = mapped_column(Integer, default=0)
     metrics_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
-    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow
+    )
 
     @property
     def metrics(self) -> dict[str, Any]:
-        return {
-            key: value
-            for key, value in self.metrics_json.items()
-            if key != "details"
-        }
+        return {key: value for key, value in self.metrics_json.items() if key != "details"}
 
     @property
     def details(self) -> list[dict[str, Any]]:

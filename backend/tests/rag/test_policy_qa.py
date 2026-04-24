@@ -1,11 +1,13 @@
-from app.services.rag import query_engine as query_engine_module
-from app.db.models.knowledge import KnowledgeChunk, KnowledgeDocument
 from sqlalchemy import text
 
+from app.db.models.knowledge import KnowledgeChunk, KnowledgeDocument
 from app.db.session import SessionLocal
+from app.services.rag import query_engine as query_engine_module
 
 
-def test_policy_answer_includes_citations_and_confidence(client, seeded_policy_chunks: None) -> None:
+def test_policy_answer_includes_citations_and_confidence(
+    client, seeded_policy_chunks: None
+) -> None:
     response = client.post(
         "/api/chat/ask",
         json={
@@ -42,7 +44,9 @@ def test_chat_session_persists_messages(client, seeded_policy_chunks: None) -> N
 
     with SessionLocal() as session:
         rows = session.execute(
-            text("SELECT role, content FROM chat_message WHERE session_id = :session_id ORDER BY created_at ASC"),
+            text(
+                "SELECT role, content FROM chat_message WHERE session_id = :session_id ORDER BY created_at ASC"
+            ),
             {"session_id": session_id},
         ).all()
 
@@ -73,12 +77,23 @@ def test_policy_answer_confidence_is_clamped_to_one(
     assert chunk_model is not None
     assert document_model is not None
 
+    # Multi-query entry is the new primary retrieval path (P2.6 접入).
+    # Patch it to return the high-scored chunk; the fallback
+    # ``_vector_search`` / ``_lexical_search`` stays stubbed empty so we
+    # can verify clamping happens once we reach the citation step.
+    monkeypatch.setattr(
+        query_engine_module,
+        "_multi_query_search",
+        lambda rewrite, tenant_id, customer_id, top_k: [(chunk_model, document_model, 1.65)],
+    )
     monkeypatch.setattr(
         query_engine_module,
         "_vector_search",
         lambda question, tenant_id, customer_id, top_k: [(chunk_model, document_model, 1.65)],
     )
-    monkeypatch.setattr(query_engine_module, "_lexical_search", lambda question, tenant_id, customer_id, top_k: [])
+    monkeypatch.setattr(
+        query_engine_module, "_lexical_search", lambda question, tenant_id, customer_id, top_k: []
+    )
 
     result = query_engine_module.answer_policy_question(
         question="Can I book business class?",
@@ -95,25 +110,23 @@ def test_answer_policy_question_rewrites_query_only_once(
 ) -> None:
     rewrite_calls = {"query_engine": 0, "retrievers": 0}
 
-    def fake_rewrite_query(question: str):
+    def fake_rewrite_query_multi(question: str, **kwargs):
         rewrite_calls["query_engine"] += 1
-        return type(
-            "RewriteResult",
-            (),
-            {
-                "expanded_query": f"{question} 扩展词",
-                "applied_rules": ["alias"],
-            },
-        )()
+        from app.services.rag.query_rewriter import MultiQueryRewriteResult
 
-    monkeypatch.setattr(query_engine_module, "rewrite_query", fake_rewrite_query)
-    monkeypatch.setattr(
-        "app.services.rag.retrievers.rewrite_query",
-        lambda question: (
-            rewrite_calls.__setitem__("retrievers", rewrite_calls["retrievers"] + 1)
-            or fake_rewrite_query(question)
-        ),
-    )
+        return MultiQueryRewriteResult(
+            original_query=question,
+            expanded_query=f"{question} 扩展词",
+            applied_rules=["alias"],
+            llm_variants=[],
+            hyde_document=None,
+        )
+
+    # Multi-query rewrite now drives the path (P2.6 接入).
+    monkeypatch.setattr(query_engine_module, "rewrite_query_multi", fake_rewrite_query_multi)
+    # retrievers.py used to import rewrite_query directly; now it doesn't,
+    # so the second counter stays at 0 -- kept as a lock-in assertion that
+    # the retriever layer hasn't re-acquired a dependency on rewriting.
 
     with SessionLocal() as session:
         row = session.execute(

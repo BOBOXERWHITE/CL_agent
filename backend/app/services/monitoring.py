@@ -9,8 +9,8 @@ from app.db.models.agent import AgentRun
 from app.db.models.conversation import ChatMessage, ChatSession
 from app.db.models.eval import EvalRun
 from app.db.models.knowledge import KnowledgeDocument
-from app.db.models.runtime_log import RuntimeLog
 from app.db.models.rule import ReviewCase
+from app.db.models.runtime_log import RuntimeLog
 from app.schemas.monitoring import (
     AgentSummaryPayload,
     ChatSummaryPayload,
@@ -48,11 +48,15 @@ def build_monitoring_overview(session: Session) -> MonitoringOverviewResponse:
         document_total=_count(session, select(func.count()).select_from(KnowledgeDocument)),
         completed_total=_count(
             session,
-            select(func.count()).select_from(KnowledgeDocument).where(KnowledgeDocument.status == "completed"),
+            select(func.count())
+            .select_from(KnowledgeDocument)
+            .where(KnowledgeDocument.status == "completed"),
         ),
         failed_total=_count(
             session,
-            select(func.count()).select_from(KnowledgeDocument).where(KnowledgeDocument.status == "failed"),
+            select(func.count())
+            .select_from(KnowledgeDocument)
+            .where(KnowledgeDocument.status == "failed"),
         ),
         pending_reindex_total=sum(
             1
@@ -88,7 +92,9 @@ def build_monitoring_overview(session: Session) -> MonitoringOverviewResponse:
     )
 
     last_hour_logs = list(
-        session.execute(select(RuntimeLog).where(RuntimeLog.created_at >= last_hour)).scalars().all()
+        session.execute(select(RuntimeLog).where(RuntimeLog.created_at >= last_hour))
+        .scalars()
+        .all()
     )
     request_summary = RequestSummaryPayload(
         last_hour_total=len(last_hour_logs),
@@ -120,7 +126,9 @@ def build_monitoring_overview(session: Session) -> MonitoringOverviewResponse:
             status=row.status,
             created_at=row.created_at,
         )
-        for row in session.execute(select(EvalRun).order_by(EvalRun.created_at.desc()).limit(5)).scalars()
+        for row in session.execute(
+            select(EvalRun).order_by(EvalRun.created_at.desc()).limit(5)
+        ).scalars()
     ]
 
     recent_agent_runs = [
@@ -130,7 +138,9 @@ def build_monitoring_overview(session: Session) -> MonitoringOverviewResponse:
             status=row.status,
             created_at=row.created_at,
         )
-        for row in session.execute(select(AgentRun).order_by(AgentRun.created_at.desc()).limit(5)).scalars()
+        for row in session.execute(
+            select(AgentRun).order_by(AgentRun.created_at.desc()).limit(5)
+        ).scalars()
     ]
 
     return MonitoringOverviewResponse(

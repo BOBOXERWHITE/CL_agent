@@ -7,7 +7,9 @@ from fastapi.testclient import TestClient
 
 
 @pytest.fixture()
-def secured_client(monkeypatch: pytest.MonkeyPatch, _test_environment: None) -> Iterator[TestClient]:
+def secured_client(
+    monkeypatch: pytest.MonkeyPatch, _test_environment: None
+) -> Iterator[TestClient]:
     monkeypatch.setenv("AUTH_ENABLED", "true")
     monkeypatch.setenv("AUTH_ADMIN_TOKENS", "admin-token")
     monkeypatch.setenv("AUTH_OPERATOR_TOKENS", "operator-token")
@@ -24,7 +26,9 @@ def secured_client(monkeypatch: pytest.MonkeyPatch, _test_environment: None) -> 
     get_settings.cache_clear()
 
 
-def test_operator_without_admin_role_cannot_edit_prompt_template(secured_client: TestClient) -> None:
+def test_operator_without_admin_role_cannot_edit_prompt_template(
+    secured_client: TestClient,
+) -> None:
     response = secured_client.post(
         "/api/prompts",
         headers={"Authorization": "Bearer operator-token"},

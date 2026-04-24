@@ -6,10 +6,10 @@ import httpx
 
 from app.services.llm.client import (
     DeterministicPolicyAnswerClient,
-    check_llm_readiness,
     OpenAICompatiblePolicyAnswerClient,
-    run_llm_smoke_test,
+    check_llm_readiness,
     get_policy_answer_client,
+    run_llm_smoke_test,
 )
 
 
@@ -24,11 +24,7 @@ def test_openai_compatible_policy_client_parses_gateway_response() -> None:
             json={
                 "model": "gpt-4o-mini",
                 "choices": [
-                    {
-                        "message": {
-                            "content": "根据当前证据，北京酒店报销上限为每晚 650 元。"
-                        }
-                    }
+                    {"message": {"content": "根据当前证据，北京酒店报销上限为每晚 650 元。"}}
                 ],
                 "usage": {"prompt_tokens": 42, "completion_tokens": 16},
             },
@@ -138,11 +134,7 @@ def test_run_llm_smoke_test_returns_answer_preview_and_token_usage() -> None:
             json={
                 "model": "gpt-4o-mini",
                 "choices": [
-                    {
-                        "message": {
-                            "content": "根据当前证据，北京酒店报销上限为每晚 650 元。"
-                        }
-                    }
+                    {"message": {"content": "根据当前证据，北京酒店报销上限为每晚 650 元。"}}
                 ],
                 "usage": {"prompt_tokens": 12, "completion_tokens": 8},
             },

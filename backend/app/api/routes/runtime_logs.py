@@ -2,14 +2,14 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, Query
 from sqlalchemy.orm import Session
 
+from app.core.errors import NotFound
 from app.core.security import AuthContext, require_roles
-from app.db.session import get_session, init_db
+from app.db.session import get_session
 from app.schemas.runtime_log import RuntimeLogListResponse, RuntimeLogPayload
 from app.services.runtime_logs import get_runtime_log, list_runtime_logs
-
 
 router = APIRouter(prefix="/api/logs", tags=["runtime-logs"])
 
@@ -27,7 +27,6 @@ def get_runtime_logs(
     date_to: datetime | None = Query(default=None),
     limit: int = Query(default=50, ge=1, le=200),
 ) -> RuntimeLogListResponse:
-    init_db()
     rows = list_runtime_logs(
         session,
         path=path,
@@ -48,8 +47,7 @@ def get_runtime_log_detail(
     _: AuthContext = Depends(require_roles("admin", "operator")),
     session: Session = Depends(get_session),
 ) -> RuntimeLogPayload:
-    init_db()
     row = get_runtime_log(session, runtime_log_id)
     if row is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="runtime log not found")
+        raise NotFound("runtime log not found", error_code="RUNTIME_LOG_NOT_FOUND")
     return RuntimeLogPayload.model_validate(row)

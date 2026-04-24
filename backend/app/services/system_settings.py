@@ -7,7 +7,7 @@ from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
 from app.db.models.system_setting import SystemSetting
-from app.db.session import SessionLocal
+from app.db.session import bypass_rls_session
 from app.schemas.system_settings import EditableSystemSettings, RuntimeSystemSettings
 
 
@@ -76,6 +76,6 @@ def update_editable_settings(
 
 
 def get_effective_business_settings() -> EffectiveBusinessSettings:
-    with SessionLocal() as session:
+    with bypass_rls_session() as session:
         editable = get_editable_settings(session)
     return EffectiveBusinessSettings(**editable.model_dump())

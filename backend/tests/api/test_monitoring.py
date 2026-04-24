@@ -9,7 +9,9 @@ from tests.conftest import DOCX_CONTENT_TYPE
 
 
 @pytest.fixture()
-def secured_client(monkeypatch: pytest.MonkeyPatch, _test_environment: None) -> Iterator[TestClient]:
+def secured_client(
+    monkeypatch: pytest.MonkeyPatch, _test_environment: None
+) -> Iterator[TestClient]:
     monkeypatch.setenv("AUTH_ENABLED", "true")
     monkeypatch.setenv("AUTH_ADMIN_TOKENS", "admin-token")
     monkeypatch.setenv("AUTH_OPERATOR_TOKENS", "operator-token")

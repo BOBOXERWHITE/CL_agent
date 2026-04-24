@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from sqlalchemy import or_, select
 
 from app.db.models.knowledge import KnowledgeChunk, KnowledgeDocument
-from app.db.session import SessionLocal
+from app.db.session import bypass_rls_session
 from app.services.rag.query_rewriter import rewrite_query as rewrite_query
 from app.services.rag.settings import get_rag_settings
 from app.services.rag.text_processing import build_search_terms, normalize_text
@@ -68,7 +68,7 @@ def _load_chunks_by_ids(
     if not chunk_ids:
         return []
 
-    with SessionLocal() as session:
+    with bypass_rls_session() as session:
         rows = session.execute(
             select(KnowledgeChunk, KnowledgeDocument)
             .join(KnowledgeDocument, KnowledgeDocument.id == KnowledgeChunk.document_id)
@@ -80,8 +80,10 @@ def _load_chunks_by_ids(
     return list(rows)
 
 
-def _load_chunks(tenant_id: str, customer_id: str) -> list[tuple[KnowledgeChunk, KnowledgeDocument]]:
-    with SessionLocal() as session:
+def _load_chunks(
+    tenant_id: str, customer_id: str
+) -> list[tuple[KnowledgeChunk, KnowledgeDocument]]:
+    with bypass_rls_session() as session:
         rows = session.execute(
             select(KnowledgeChunk, KnowledgeDocument)
             .join(KnowledgeDocument, KnowledgeDocument.id == KnowledgeChunk.document_id)
@@ -127,7 +129,7 @@ def _load_lexical_candidates(
             ]
         )
 
-    with SessionLocal() as session:
+    with bypass_rls_session() as session:
         rows = session.execute(
             select(KnowledgeChunk, KnowledgeDocument)
             .join(KnowledgeDocument, KnowledgeDocument.id == KnowledgeChunk.document_id)
@@ -176,11 +178,15 @@ def fuse_ranked_hits(
     fused_scores: dict[str, float] = {}
 
     for rank, hit in enumerate(dense_hits, start=1):
-        fused_scores[hit.chunk_id] = fused_scores.get(hit.chunk_id, 0.0) + _reciprocal_rank(rank, rrf_k)
+        fused_scores[hit.chunk_id] = fused_scores.get(hit.chunk_id, 0.0) + _reciprocal_rank(
+            rank, rrf_k
+        )
         merged[hit.chunk_id] = hit
 
     for rank, hit in enumerate(lexical_hits, start=1):
-        fused_scores[hit.chunk_id] = fused_scores.get(hit.chunk_id, 0.0) + _reciprocal_rank(rank, rrf_k)
+        fused_scores[hit.chunk_id] = fused_scores.get(hit.chunk_id, 0.0) + _reciprocal_rank(
+            rank, rrf_k
+        )
         existing = merged.get(hit.chunk_id)
         if existing is None:
             merged[hit.chunk_id] = hit
@@ -214,7 +220,9 @@ def fuse_ranked_hits(
     )
 
 
-def retrieve_lexical(question: str, tenant_id: str, customer_id: str, top_k: int) -> list[RetrievalHit]:
+def retrieve_lexical(
+    question: str, tenant_id: str, customer_id: str, top_k: int
+) -> list[RetrievalHit]:
     rag_settings = get_rag_settings()
     candidate_limit = max(top_k * rag_settings.lexical_candidate_multiplier, 24)
     rows = _load_lexical_candidates(tenant_id, customer_id, question, candidate_limit)
@@ -238,7 +246,9 @@ def retrieve_lexical(question: str, tenant_id: str, customer_id: str, top_k: int
     return hits[: max(top_k * 2, top_k)]
 
 
-def retrieve_dense(question: str, tenant_id: str, customer_id: str, top_k: int) -> list[RetrievalHit]:
+def retrieve_dense(
+    question: str, tenant_id: str, customer_id: str, top_k: int
+) -> list[RetrievalHit]:
     rag_settings = get_rag_settings()
     candidate_limit = max(top_k * rag_settings.dense_candidate_multiplier, top_k)
     vector_hits = get_vector_store().search(
@@ -275,7 +285,9 @@ def retrieve_dense(question: str, tenant_id: str, customer_id: str, top_k: int) 
     return hits[:candidate_limit]
 
 
-def retrieve_hybrid(question: str, tenant_id: str, customer_id: str, top_k: int) -> list[RetrievalHit]:
+def retrieve_hybrid(
+    question: str, tenant_id: str, customer_id: str, top_k: int
+) -> list[RetrievalHit]:
     rag_settings = get_rag_settings()
     dense_hits = retrieve_dense(question, tenant_id, customer_id, top_k)
     lexical_hits = retrieve_lexical(question, tenant_id, customer_id, top_k)

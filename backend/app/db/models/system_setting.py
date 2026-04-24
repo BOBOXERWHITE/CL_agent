@@ -19,4 +19,6 @@ class SystemSetting(Base):
     key: Mapped[str] = mapped_column(String(64), primary_key=True)
     value_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     updated_by_role: Mapped[str] = mapped_column(String(32), default="admin")
-    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow
+    )

@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 
 from app.core.config import get_settings
 from app.services.rag.index_builder import VectorRecord, text_to_embedding
 from app.services.rag.settings import get_rag_settings
+
+_log = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -17,17 +20,30 @@ class NoopVectorStore:
     def upsert(self, records: list[VectorRecord]) -> dict[str, str]:
         return {record.chunk_id: f"noop:{record.chunk_id}" for record in records}
 
-    def search(self, *, query_text: str, tenant_id: str, customer_id: str, top_k: int) -> list[tuple[str, float]]:
+    def search(
+        self, *, query_text: str, tenant_id: str, customer_id: str, top_k: int
+    ) -> list[tuple[str, float]]:
         del query_text, tenant_id, customer_id, top_k
         return []
 
     def delete(self, chunk_ids: list[str]) -> int:
         return len(chunk_ids)
 
+    def preload(self) -> None:
+        """No-op: the noop store has no state to warm."""
+        return
+
 
 class MilvusVectorStore:
     def __init__(self) -> None:
-        from pymilvus import Collection, CollectionSchema, DataType, FieldSchema, connections, utility
+        from pymilvus import (
+            Collection,
+            CollectionSchema,
+            DataType,
+            FieldSchema,
+            connections,
+            utility,
+        )
 
         settings = get_settings()
         rag_settings = get_rag_settings()
@@ -45,6 +61,10 @@ class MilvusVectorStore:
         self._field_cls = FieldSchema
         self._datatype = DataType
         self._embedding_dimension = rag_settings.embedding_dimension
+        # P2.8: track whether collection.load() has been called at least
+        # once this process. search() used to call it per query, which
+        # is the Milvus anti-pattern flagged in the original audit.
+        self._loaded = False
 
     def _ensure_collection(self):
         if self._utility.has_collection(self._collection_name, using="travel_ops"):
@@ -86,9 +106,18 @@ class MilvusVectorStore:
             schema=schema,
             using="travel_ops",
         )
+        # P2.8: use HNSW instead of AUTOINDEX for tunable recall/latency.
+        # M=16 efConstruction=200 are the Milvus docs' recommended defaults
+        # for <1M vector collections; ef=64 at query time is a good starting
+        # point and can be raised (`param={"params": {"ef": 128}}`) to lift
+        # recall at the cost of latency.
         collection.create_index(
             field_name="embedding",
-            index_params={"index_type": "AUTOINDEX", "metric_type": "IP"},
+            index_params={
+                "index_type": "HNSW",
+                "metric_type": "IP",
+                "params": {"M": 16, "efConstruction": 200},
+            },
         )
         return collection
 
@@ -164,7 +193,39 @@ class MilvusVectorStore:
         collection.flush()
         return len(chunk_ids)
 
-    def search(self, *, query_text: str, tenant_id: str, customer_id: str, top_k: int) -> list[tuple[str, float]]:
+    def preload(self) -> None:
+        """Warm the collection into Milvus memory once per process.
+
+        Called from the FastAPI lifespan hook (P2.8). Safe to call
+        repeatedly: subsequent calls short-circuit via ``_loaded``.
+        Failures here must not crash app startup -- search() will
+        opportunistically retry the load on first use.
+        """
+        if self._loaded:
+            return
+        try:
+            if not self._utility.has_collection(self._collection_name, using="travel_ops"):
+                _log.info(
+                    "milvus_preload_skipped_collection_missing",
+                    extra={"collection": self._collection_name},
+                )
+                return
+            collection = self._collection_cls(self._collection_name, using="travel_ops")
+            collection.load()
+            self._loaded = True
+            _log.info(
+                "milvus_collection_loaded",
+                extra={"collection": self._collection_name},
+            )
+        except Exception as exc:
+            _log.warning(
+                "milvus_preload_failed",
+                extra={"collection": self._collection_name, "error": str(exc)},
+            )
+
+    def search(
+        self, *, query_text: str, tenant_id: str, customer_id: str, top_k: int
+    ) -> list[tuple[str, float]]:
         if top_k <= 0:
             return []
 
@@ -172,7 +233,12 @@ class MilvusVectorStore:
             return []
 
         collection = self._collection_cls(self._collection_name, using="travel_ops")
-        collection.load()
+        # P2.8: load once per process, not per query. ``_loaded`` is
+        # flipped by ``preload()`` (lifespan) or by this defensive call
+        # if preload was skipped / failed.
+        if not self._loaded:
+            collection.load()
+            self._loaded = True
         query_vector = text_to_embedding(query_text, self._embedding_dimension)
         safe_tenant = self._escape_literal(tenant_id)
         safe_customer = self._escape_literal(customer_id)
@@ -180,7 +246,9 @@ class MilvusVectorStore:
         search_result = collection.search(
             data=[query_vector],
             anns_field="embedding",
-            param={"metric_type": "IP", "params": {}},
+            # HNSW search param: ef=64 is a sensible starting default; raise
+            # to trade latency for recall.
+            param={"metric_type": "IP", "params": {"ef": 64}},
             limit=top_k,
             expr=expr,
             output_fields=["chunk_id"],

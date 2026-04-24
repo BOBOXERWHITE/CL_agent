@@ -144,7 +144,9 @@ def test_reindex_endpoint_returns_gateway_error_detail_when_embedding_provider_f
 
     monkeypatch.setattr(
         "app.services.ingestion.pipeline.build_vector_records",
-        lambda chunks: (_ for _ in ()).throw(RuntimeError("embedding gateway request failed (400): batch size invalid")),
+        lambda chunks: (_ for _ in ()).throw(
+            RuntimeError("embedding gateway request failed (400): batch size invalid")
+        ),
     )
 
     response = client.post("/api/knowledge/reindex", json={})
@@ -242,7 +244,9 @@ def test_delete_endpoint_removes_document_chunks_and_source_file(client, docx_fi
 
     with SessionLocal() as session:
         assert session.get(KnowledgeDocument, document_id) is None
-        remaining_chunks = session.query(KnowledgeChunk).filter(KnowledgeChunk.document_id == document_id).count()
+        remaining_chunks = (
+            session.query(KnowledgeChunk).filter(KnowledgeChunk.document_id == document_id).count()
+        )
         assert remaining_chunks == 0
 
     assert storage_path.exists() is False

@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from prometheus_client import CONTENT_TYPE_LATEST, Counter, Histogram, generate_latest
 
-
 HTTP_REQUESTS_TOTAL = Counter(
     "travel_ops_http_requests_total",
     "Total HTTP requests handled by the API.",

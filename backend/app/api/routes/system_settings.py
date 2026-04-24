@@ -4,10 +4,13 @@ from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
 
 from app.core.security import AuthContext, require_roles
-from app.db.session import get_session, init_db
+from app.db.session import get_session
 from app.schemas.system_settings import EditableSystemSettings, SystemSettingsResponse
-from app.services.system_settings import get_editable_settings, get_runtime_settings, update_editable_settings
-
+from app.services.system_settings import (
+    get_editable_settings,
+    get_runtime_settings,
+    update_editable_settings,
+)
 
 router = APIRouter(prefix="/api/settings", tags=["system-settings"])
 
@@ -17,7 +20,6 @@ def get_system_settings(
     _: AuthContext = Depends(require_roles("admin")),
     session: Session = Depends(get_session),
 ) -> SystemSettingsResponse:
-    init_db()
     return SystemSettingsResponse(
         editable_settings=get_editable_settings(session),
         runtime_settings=get_runtime_settings(),
@@ -30,7 +32,6 @@ def put_system_settings(
     auth_context: AuthContext = Depends(require_roles("admin")),
     session: Session = Depends(get_session),
 ) -> SystemSettingsResponse:
-    init_db()
     editable = update_editable_settings(
         session,
         payload,

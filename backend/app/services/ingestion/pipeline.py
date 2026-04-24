@@ -7,7 +7,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import selectinload
 
 from app.db.models.knowledge import KnowledgeChunk, KnowledgeDocument
-from app.db.session import SessionLocal, init_db
+from app.db.session import bypass_rls_session, init_db
 from app.services.ingestion.chunker import chunk_document
 from app.services.ingestion.loader import get_object_storage
 from app.services.ingestion.parser import parse_document
@@ -35,8 +35,8 @@ class KnowledgeJobSnapshot:
     customer_id: str
     created_at: object
     updated_at: object
-    stored_embedding_profile: "KnowledgeEmbeddingProfileSnapshot | None"
-    current_embedding_profile: "KnowledgeEmbeddingProfileSnapshot"
+    stored_embedding_profile: KnowledgeEmbeddingProfileSnapshot | None
+    current_embedding_profile: KnowledgeEmbeddingProfileSnapshot
     requires_reindex: bool
 
 
@@ -63,7 +63,9 @@ class KnowledgeDeleteSnapshot:
     chunk_count: int
 
 
-def _to_profile_snapshot(profile: EmbeddingProfile | dict[str, object] | None) -> KnowledgeEmbeddingProfileSnapshot | None:
+def _to_profile_snapshot(
+    profile: EmbeddingProfile | dict[str, object] | None,
+) -> KnowledgeEmbeddingProfileSnapshot | None:
     if profile is None:
         return None
 
@@ -99,7 +101,9 @@ def _profile_to_json(profile: EmbeddingProfile) -> dict[str, object]:
     }
 
 
-def _stored_profile_for_document(document: KnowledgeDocument) -> KnowledgeEmbeddingProfileSnapshot | None:
+def _stored_profile_for_document(
+    document: KnowledgeDocument,
+) -> KnowledgeEmbeddingProfileSnapshot | None:
     attributes = document.attributes_json if isinstance(document.attributes_json, dict) else {}
     return _to_profile_snapshot(attributes.get("embedding_profile"))
 
@@ -148,12 +152,14 @@ def create_ingestion_job(
 ) -> str:
     init_db()
     object_storage = get_object_storage()
-    stored_object = object_storage.store(file_bytes=file_bytes, filename=filename, content_type=content_type)
+    stored_object = object_storage.store(
+        file_bytes=file_bytes, filename=filename, content_type=content_type
+    )
 
     document_id = str(uuid4())
     job_id = str(uuid4())
 
-    with SessionLocal() as session:
+    with bypass_rls_session() as session:
         session.add(
             KnowledgeDocument(
                 id=document_id,
@@ -178,7 +184,7 @@ def run_ingestion_job(document_id: str) -> IngestionResult:
     object_storage = get_object_storage()
     embedding_profile = get_active_embedding_profile()
 
-    with SessionLocal() as session:
+    with bypass_rls_session() as session:
         document = session.get(KnowledgeDocument, document_id)
         if document is None:
             raise ValueError(f"document {document_id} not found")
@@ -261,7 +267,7 @@ def start_ingestion(
 
 
 def get_job(document_id: str) -> KnowledgeJobSnapshot:
-    with SessionLocal() as session:
+    with bypass_rls_session() as session:
         document = session.get(KnowledgeDocument, document_id)
         if document is None:
             raise ValueError(f"document {document_id} not found")
@@ -272,14 +278,16 @@ def get_job(document_id: str) -> KnowledgeJobSnapshot:
 
 
 def list_jobs() -> list[KnowledgeJobSnapshot]:
-    with SessionLocal() as session:
+    with bypass_rls_session() as session:
         documents = session.scalars(
             select(KnowledgeDocument).order_by(KnowledgeDocument.created_at.desc())
         ).all()
     current_profile = _to_profile_snapshot(get_active_embedding_profile())
     assert current_profile is not None
 
-    return [_build_job_snapshot(document, current_profile=current_profile) for document in documents]
+    return [
+        _build_job_snapshot(document, current_profile=current_profile) for document in documents
+    ]
 
 
 def rebuild_knowledge_index(
@@ -292,7 +300,7 @@ def rebuild_knowledge_index(
     current_profile = _to_profile_snapshot(embedding_profile)
     assert current_profile is not None
 
-    with SessionLocal() as session:
+    with bypass_rls_session() as session:
         query = (
             select(KnowledgeDocument)
             .options(selectinload(KnowledgeDocument.chunks))
@@ -313,7 +321,9 @@ def rebuild_knowledge_index(
             documents = [
                 document
                 for document in documents
-                if _requires_reindex(document, _stored_profile_for_document(document), current_profile)
+                if _requires_reindex(
+                    document, _stored_profile_for_document(document), current_profile
+                )
             ]
             if not documents:
                 raise ValueError("no stale documents available for reindex")
@@ -356,12 +366,16 @@ def delete_knowledge_document(document_id: str) -> KnowledgeDeleteSnapshot:
     object_storage = get_object_storage()
     vector_store = get_vector_store()
 
-    with SessionLocal() as session:
-        document = session.scalars(
-            select(KnowledgeDocument)
-            .options(selectinload(KnowledgeDocument.chunks))
-            .where(KnowledgeDocument.id == document_id)
-        ).unique().one_or_none()
+    with bypass_rls_session() as session:
+        document = (
+            session.scalars(
+                select(KnowledgeDocument)
+                .options(selectinload(KnowledgeDocument.chunks))
+                .where(KnowledgeDocument.id == document_id)
+            )
+            .unique()
+            .one_or_none()
+        )
 
         if document is None:
             raise ValueError(f"document {document_id} not found")

@@ -52,3 +52,15 @@ class AgentRunPayload(BaseModel):
 
 class AgentRunListResponse(BaseModel):
     items: list[AgentRunPayload]
+
+
+class AgentRunResumeRequest(BaseModel):
+    """Reviewer-provided decision on a paused agent run (P3.8 HITL).
+
+    ``decision`` is the terminal outcome the reviewer chose; ``note`` is an
+    optional free-form reasoning that lands in the audit log and the
+    ReviewCase resolution.
+    """
+
+    decision: str = Field(pattern="^(approve|reject)$")
+    note: str = Field(default="", max_length=2000)

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from time import perf_counter
 
@@ -15,6 +17,23 @@ class AnswerDraft:
     confidence: float
     model_name: str
     token_usage: dict[str, int]
+
+
+@dataclass(frozen=True)
+class StreamChunk:
+    """One chunk in a streaming answer (P6.5).
+
+    ``delta`` is the new text to append to the answer so far. ``done``
+    is True on the terminal chunk; the terminal chunk may carry a
+    ``token_usage`` dict so the caller can update aggregates after the
+    stream closes. Intermediate chunks leave those fields at their
+    defaults.
+    """
+
+    delta: str = ""
+    done: bool = False
+    token_usage: dict[str, int] | None = None
+    model_name: str = ""
 
 
 @dataclass(frozen=True)
@@ -66,7 +85,9 @@ class DeterministicPolicyAnswerClient:
     ) -> AnswerDraft:
         normalized_question = question.lower()
         primary_snippet = evidence_snippets[0]
-        input_tokens = len((question + " " + " ".join(evidence_snippets) + " " + prompt_template).split())
+        input_tokens = len(
+            (question + " " + " ".join(evidence_snippets) + " " + prompt_template).split()
+        )
         is_chinese_query = self._is_chinese_query(question)
 
         if "business class" in normalized_question and "economy class" in primary_snippet.lower():
@@ -105,6 +126,72 @@ class DeterministicPolicyAnswerClient:
             confidence=max(confidence, 0.78),
             model_name=self.model_name,
             token_usage={"input_tokens": input_tokens, "output_tokens": len(answer.split())},
+        )
+
+    async def generate_answer_async(
+        self,
+        *,
+        question: str,
+        evidence_snippets: list[str],
+        confidence: float,
+        prompt_template: str,
+    ) -> AnswerDraft:
+        """Deterministic twin of the async API; no IO, no awaits needed.
+
+        Kept so the async query engine can treat every answer client
+        identically without a provider-type branch.
+        """
+        return self.generate_answer(
+            question=question,
+            evidence_snippets=evidence_snippets,
+            confidence=confidence,
+            prompt_template=prompt_template,
+        )
+
+    async def stream_answer_async(
+        self,
+        *,
+        question: str,
+        evidence_snippets: list[str],
+        confidence: float,
+        prompt_template: str,
+    ) -> AsyncIterator[StreamChunk]:
+        """P6.5: deterministic streaming.
+
+        The deterministic client has the whole answer ready upfront,
+        so we split it into a few word-group chunks and yield them
+        back-to-back. This gives tests something to consume without
+        needing a real LLM while exercising the async generator shape.
+        """
+        draft = self.generate_answer(
+            question=question,
+            evidence_snippets=evidence_snippets,
+            confidence=confidence,
+            prompt_template=prompt_template,
+        )
+        # Split on whitespace into ~5 roughly equal pieces so the test
+        # assertions on chunk count are stable.
+        words = draft.answer.split()
+        group_size = max(1, len(words) // 4) if words else 1
+        groups: list[str] = []
+        buffer: list[str] = []
+        for word in words:
+            buffer.append(word)
+            if len(buffer) >= group_size:
+                groups.append(" ".join(buffer))
+                buffer = []
+        if buffer:
+            groups.append(" ".join(buffer))
+        if not groups:
+            groups = [draft.answer]
+        for idx, group in enumerate(groups):
+            suffix = "" if idx == len(groups) - 1 else " "
+            yield StreamChunk(delta=group + suffix, model_name=draft.model_name)
+        yield StreamChunk(
+            delta="",
+            done=True,
+            token_usage=dict(draft.token_usage),
+            model_name=draft.model_name,
         )
 
 
@@ -170,8 +257,159 @@ class OpenAICompatiblePolicyAnswerClient:
             },
         )
 
+    async def stream_answer_async(
+        self,
+        *,
+        question: str,
+        evidence_snippets: list[str],
+        confidence: float,
+        prompt_template: str,
+        async_client: httpx.AsyncClient | None = None,
+    ) -> AsyncIterator[StreamChunk]:
+        """P6.5: OpenAI-compatible chat-completions SSE consumer.
 
-def get_policy_answer_client() -> DeterministicPolicyAnswerClient | OpenAICompatiblePolicyAnswerClient:
+        Sends ``stream=true`` + iterates the server-sent events.
+        Each ``data:`` line is a JSON chunk with a ``choices[0].delta``
+        field; we yield those as ``StreamChunk(delta=...)``. A final
+        chunk with ``done=True`` carries the aggregated ``token_usage``
+        if the server supplied one in the final ``[DONE]`` envelope.
+
+        The terminal ``data: [DONE]`` line has no JSON body — we only
+        use it to exit the loop cleanly.
+        """
+        client = async_client
+        if client is None:
+            from app.services.rag.async_http_client import get_async_http_client
+
+            client = get_async_http_client()
+
+        evidence_block = "\n".join(f"- {snippet}" for snippet in evidence_snippets)
+        req_body = {
+            "model": self.model_name,
+            "temperature": 0.1,
+            "stream": True,
+            "messages": [
+                {"role": "system", "content": prompt_template},
+                {
+                    "role": "user",
+                    "content": (
+                        "请基于给定证据回答问题，回答要简洁且不能捏造未出现的信息。\n"
+                        f"问题：{question}\n"
+                        f"证据：\n{evidence_block}"
+                    ),
+                },
+            ],
+        }
+
+        total_content: list[str] = []
+        final_model = self.model_name
+        final_usage: dict[str, int] | None = None
+
+        async with client.stream(
+            "POST",
+            f"{self.base_url}/chat/completions",
+            headers={
+                "Authorization": f"Bearer {self.api_key}",
+                "Content-Type": "application/json",
+            },
+            json=req_body,
+        ) as response:
+            response.raise_for_status()
+            async for raw in response.aiter_lines():
+                line = raw.strip() if raw else ""
+                if not line or not line.startswith("data:"):
+                    continue
+                payload = line[len("data:") :].strip()
+                if payload == "[DONE]":
+                    break
+                try:
+                    parsed = json.loads(payload)
+                except json.JSONDecodeError:
+                    continue
+                final_model = str(parsed.get("model", final_model))
+                choices = parsed.get("choices") or []
+                if choices:
+                    delta = choices[0].get("delta", {})
+                    content = delta.get("content")
+                    if isinstance(content, str) and content:
+                        total_content.append(content)
+                        yield StreamChunk(delta=content, model_name=final_model)
+                usage = parsed.get("usage")
+                if isinstance(usage, dict):
+                    final_usage = {
+                        "input_tokens": int(usage.get("prompt_tokens", 0)),
+                        "output_tokens": int(usage.get("completion_tokens", 0)),
+                    }
+
+        yield StreamChunk(
+            delta="",
+            done=True,
+            token_usage=final_usage or {"input_tokens": 0, "output_tokens": 0},
+            model_name=final_model,
+        )
+
+    async def generate_answer_async(
+        self,
+        *,
+        question: str,
+        evidence_snippets: list[str],
+        confidence: float,
+        prompt_template: str,
+        async_client: httpx.AsyncClient | None = None,
+    ) -> AnswerDraft:
+        """Async twin of :meth:`generate_answer` (P4.2).
+
+        Same request body + same response parsing. Pulls the shared
+        ``AsyncClient`` from P4.1's factory when the caller doesn't inject
+        one (tests inject a ``MockTransport``-backed client).
+        """
+        client = async_client
+        if client is None:
+            from app.services.rag.async_http_client import get_async_http_client
+
+            client = get_async_http_client()
+
+        evidence_block = "\n".join(f"- {snippet}" for snippet in evidence_snippets)
+        response = await client.post(
+            f"{self.base_url}/chat/completions",
+            headers={
+                "Authorization": f"Bearer {self.api_key}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "model": self.model_name,
+                "temperature": 0.1,
+                "messages": [
+                    {"role": "system", "content": prompt_template},
+                    {
+                        "role": "user",
+                        "content": (
+                            "请基于给定证据回答问题，回答要简洁且不能捏造未出现的信息。\n"
+                            f"问题：{question}\n"
+                            f"证据：\n{evidence_block}"
+                        ),
+                    },
+                ],
+            },
+        )
+        response.raise_for_status()
+        payload = response.json()
+        answer = str(payload["choices"][0]["message"]["content"]).strip()
+        usage = payload.get("usage", {})
+        return AnswerDraft(
+            answer=answer,
+            confidence=confidence,
+            model_name=str(payload.get("model", self.model_name)),
+            token_usage={
+                "input_tokens": int(usage.get("prompt_tokens", 0)),
+                "output_tokens": int(usage.get("completion_tokens", 0)),
+            },
+        )
+
+
+def get_policy_answer_client() -> (
+    DeterministicPolicyAnswerClient | OpenAICompatiblePolicyAnswerClient
+):
     settings = get_settings()
     if (
         settings.llm_provider == "openai-compatible"
