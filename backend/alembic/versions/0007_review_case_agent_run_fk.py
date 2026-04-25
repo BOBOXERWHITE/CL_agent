@@ -62,8 +62,7 @@ def upgrade() -> None:
             """
             UPDATE review_case
             SET agent_run_id = payload_json->>'agent_run_id'
-            WHERE payload_json ? 'agent_run_id'
-              AND payload_json->>'agent_run_id' IS NOT NULL
+            WHERE payload_json->>'agent_run_id' IS NOT NULL
             """
         )
 
