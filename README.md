@@ -1,14 +1,67 @@
 # CL_agent — Travel Ops Copilot
 
+> **Production-grade RAG + Agent reference for corporate travel ops.**
+> Chinese-first hybrid retrieval, multi-agent workflows, real-gateway / local-fallback model layer,
+> and a 9-tab operations console — not just another chat-with-PDF demo.
+
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
 [![Python 3.13+](https://img.shields.io/badge/python-3.13+-blue.svg)](https://www.python.org/)
 [![Node 20+](https://img.shields.io/badge/node-20+-green.svg)](https://nodejs.org/)
+[![FastAPI](https://img.shields.io/badge/FastAPI-009688?logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com/)
+[![React](https://img.shields.io/badge/React-61DAFB?logo=react&logoColor=black)](https://react.dev/)
+[![Milvus](https://img.shields.io/badge/Milvus-00A1EA?logo=milvus&logoColor=white)](https://milvus.io/)
+[![Docker](https://img.shields.io/badge/Docker-2496ED?logo=docker&logoColor=white)](https://www.docker.com/)
+[![PRs welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](./CONTRIBUTING.md)
 
-An enterprise-grade `RAG + Agent` reference implementation for the **corporate travel operations** domain.
-The system pairs a hybrid retrieval pipeline (BM25 + dense + light reranker) with a multi-agent workflow
-(query routing, ticket triage, anomaly handling) and ships with a full operations console:
-knowledge ingestion, prompt management, offline evaluation, agent runs, manual review queue, monitoring,
-runtime logs and runtime settings.
+---
+
+## ✨ Why this project
+
+Most open-source RAG samples stop at *"upload a PDF, ask a question, get an answer."*
+**CL_agent goes the rest of the way to a system you could actually put in front of an ops team.**
+
+| 🎯 Capability | What's actually inside |
+| --- | --- |
+| **🇨🇳 Chinese-first hybrid retrieval** | BM25 + dense vectors + lightweight reranker, with query rewrite, alias expansion and mixed-language handling — tuned on real Chinese policy text, not translated English. |
+| **🤖 Real multi-agent workflows** | LangGraph-style stateful graphs for `travel_policy_agent`, `ticket_router_agent` and anomaly handling — every step persisted to `agent_run` + `tool_call_log` for full replay. |
+| **🔌 Gateway-or-local model layer** | OpenAI-compatible gateway in production (DashScope / Volces ARK / OpenAI / your own), deterministic local fallback for dev — **the same code path, no `if MOCK:` branches**. |
+| **📊 Built-in offline evaluation** | Ship a dataset, get answer correctness, citation hit rate and low-confidence ratio per question. Compare runs, drill into failures, export CSV — all in the UI. |
+| **👮 Rule engine + human review queue** | Configurable rules auto-route low-confidence or policy-violating answers to a manual review panel. No more "the LLM said something weird" black holes. |
+| **🛠️ Real ops console (9 tabs)** | Knowledge / Q&A / Prompts / Eval / Agents / Review / Monitoring / Runtime logs / Settings. Tenant + customer scoping, RBAC (`admin` / `operator` / `reviewer`), live config override without restart. |
+| **📈 Production observability** | Prometheus `/metrics`, request-ID tracing across every layer, `runtime_log` table for queryable history, `rag_recall_log` for retrieval forensics. |
+| **🚢 Container + K8s ready** | Dockerfiles, `docker-compose` for the full local stack (Postgres + Redis + MinIO + Milvus + etcd + Attu), Kubernetes manifests under `infra/k8s`. |
+
+## 🏗️ Architecture at a glance
+
+```
+┌────────────────────────────────────────────────────────────────────────┐
+│                React + Vite Operations Console (9 tabs, RBAC)          │
+└──────────────────────────────────┬─────────────────────────────────────┘
+                                   │  REST + SSE (X-Request-ID end-to-end)
+┌──────────────────────────────────┴─────────────────────────────────────┐
+│                          FastAPI Application                            │
+│  ┌──────────┐  ┌──────────────┐  ┌──────────┐  ┌────────────────────┐  │
+│  │ Routes   │→ │ Agent Graphs │→ │ RAG Core │→ │ Model Gateway Layer │  │
+│  │ + RBAC   │  │ (LangGraph)  │  │ Hybrid + │  │ openai-compatible / │  │
+│  │          │  │ + Tool Calls │  │ Rerank   │  │ deterministic local │  │
+│  └──────────┘  └──────────────┘  └──────────┘  └────────────────────┘  │
+│        │              │                │                  │             │
+│        ▼              ▼                ▼                  ▼             │
+│  ┌─────────────────────────────────────────────────────────────────┐   │
+│  │ PostgreSQL │ Redis │ MinIO (objects) │ Milvus (vectors) │ etcd  │   │
+│  └─────────────────────────────────────────────────────────────────┘   │
+│        │                                                                │
+│        └──→ Prometheus /metrics  +  runtime_log  +  rag_recall_log     │
+└────────────────────────────────────────────────────────────────────────┘
+```
+
+## 🎬 30-second demo flow
+
+1. Drop a Chinese travel-policy DOCX into **Knowledge** → ingestion job runs end-to-end (parse → chunk → embed → index).
+2. Ask `"北京酒店报销上限是多少？"` in **Q&A** → get an answer with **citations + confidence + retrieval trace**.
+3. Open **Eval**, run `zh-policy-smoke` → see correctness / citation-hit / low-confidence broken down per question.
+4. Trigger a sample ticket in **Agents** → watch the LangGraph timeline, rule hits and tool calls get persisted.
+5. Edit the confidence threshold in **Settings** → next answer reflects the new threshold without a restart.
 
 > 中文用户请直接阅读下方的中文章节，下面只是一段英文快速上手指引。
 
