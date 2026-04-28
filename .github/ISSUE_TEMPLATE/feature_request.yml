@@ -1,0 +1,68 @@
+name: Feature request
+description: Propose a new feature or enhancement for CL_agent
+title: "[feat] <short summary>"
+labels: ["enhancement", "triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for proposing a feature. Please describe the user problem first, then the
+        suggested solution. Concrete user stories help triage faster than abstract ideas.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What user problem are you trying to solve? Who is the user?
+      placeholder: |
+        As a knowledge ops engineer I cannot easily compare two evaluation runs side by side,
+        so I cannot tell whether a prompt change actually improved citation hit rate.
+    validations:
+      required: true
+
+  - type: textarea
+    id: solution
+    attributes:
+      label: Proposed solution
+      description: What should change in the product? Be specific about the surface area (API, UI, agent, etc.).
+      placeholder: |
+        Add a "Compare runs" button on the eval panel that opens a diff view between two runs,
+        highlighting changes in answer correctness, citation hit and low-confidence ratio per question.
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: What other approaches did you think about? Why are they worse?
+
+  - type: dropdown
+    id: scope
+    attributes:
+      label: Scope
+      options:
+        - Backend only
+        - Frontend only
+        - Backend + Frontend
+        - Infrastructure / DevOps
+        - Documentation
+        - Not sure
+    validations:
+      required: true
+
+  - type: textarea
+    id: additional
+    attributes:
+      label: Additional context
+      description: Mockups, links, related issues, anything else that helps.
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Pre-flight checks
+      options:
+        - label: I searched existing issues and this is not a duplicate.
+          required: true
+        - label: This is a feature request, not a bug report.
+          required: true

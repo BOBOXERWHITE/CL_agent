@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Question or discussion
+    url: https://github.com/BOBOXERWHITE/CL_agent/discussions
+    about: For setup help, design discussion or general questions, please open a Discussion instead of an Issue.

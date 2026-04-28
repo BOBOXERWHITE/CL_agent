@@ -1,0 +1,86 @@
+name: Bug report
+description: Report a defect in CL_agent
+title: "[bug] <short summary>"
+labels: ["bug", "triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to file a bug. Please fill in the sections below so we can
+        reproduce and fix the problem quickly.
+
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: A clear and concise description of what the bug is.
+      placeholder: When I upload a PDF larger than 50 MB, the ingestion job hangs at "处理中".
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction steps
+      description: Step-by-step instructions to reproduce the bug.
+      placeholder: |
+        1. Start backend with `uvicorn app.main:app --reload`
+        2. Open `http://localhost:5173/knowledge`
+        3. Upload `large.pdf` (52 MB)
+        4. Observe job stuck at "处理中" for > 5 minutes
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behaviour
+      placeholder: Job should either complete or fail with a visible error.
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behaviour
+      placeholder: Job hangs indefinitely; no error in logs.
+    validations:
+      required: true
+
+  - type: input
+    id: backend-version
+    attributes:
+      label: Backend commit / version
+      placeholder: ea00992 (or `git rev-parse --short HEAD`)
+    validations:
+      required: false
+
+  - type: dropdown
+    id: provider
+    attributes:
+      label: LLM / Embedding provider
+      options:
+        - deterministic (local fallback)
+        - openai-compatible (real gateway)
+        - mixed
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs
+      description: Paste any backend / frontend logs. Redact secrets and customer data.
+      render: shell
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Pre-flight checks
+      options:
+        - label: I searched existing issues and this is not a duplicate.
+          required: true
+        - label: I am running the latest `main` branch (or noted the commit above).
+          required: true
+        - label: I removed any real API keys, tokens or customer data from the report.
+          required: true

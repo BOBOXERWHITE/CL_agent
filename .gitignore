@@ -1,13 +1,32 @@
+# Python
 __pycache__/
 .pytest_cache/
 .venv/
 .mypy_cache/
+.ruff_cache/
 *.egg-info/
+*.pyc
 backend/.pytest_cache/
+backend/.ruff_cache/
+
+# Node / frontend
 frontend/node_modules/
 frontend/dist/
 frontend/*.tsbuildinfo
-# Environment files (P1.7)
+
+# Logs and runtime artifacts
+*.log
+logs/
+backend-start.log
+backend-start.err.log
+frontend-start.log
+frontend-start.err.log
+
+# Local data
+data/
+backend/data/
+
+# Environment files
 # - .env, .env.local, .env.*.local always contain real secrets and must stay local.
 # - .env.example is the committed placeholder template (allow-listed below).
 .env
@@ -16,5 +35,10 @@ frontend/*.tsbuildinfo
 !.env.example
 frontend/.env
 frontend/.env.local
+
+# Editor / OS
 ~$*.docx
 .DS_Store
+Thumbs.db
+.vscode/
+.idea/

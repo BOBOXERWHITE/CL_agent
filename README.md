@@ -1,4 +1,84 @@
-# CL_agent
+# CL_agent — Travel Ops Copilot
+
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
+[![Python 3.13+](https://img.shields.io/badge/python-3.13+-blue.svg)](https://www.python.org/)
+[![Node 20+](https://img.shields.io/badge/node-20+-green.svg)](https://nodejs.org/)
+
+An enterprise-grade `RAG + Agent` reference implementation for the **corporate travel operations** domain.
+The system pairs a hybrid retrieval pipeline (BM25 + dense + light reranker) with a multi-agent workflow
+(query routing, ticket triage, anomaly handling) and ships with a full operations console:
+knowledge ingestion, prompt management, offline evaluation, agent runs, manual review queue, monitoring,
+runtime logs and runtime settings.
+
+> 中文用户请直接阅读下方的中文章节，下面只是一段英文快速上手指引。
+
+## English Quickstart
+
+### Prerequisites
+- Docker Desktop (with `docker compose`)
+- Python `3.13+`
+- Node.js `20+` and `npm`
+
+### 1. Clone & configure
+```bash
+git clone https://github.com/BOBOXERWHITE/CL_agent.git
+cd CL_agent
+cp .env.example .env
+cp frontend/.env.example frontend/.env
+```
+
+### 2. Start infrastructure (PostgreSQL, Redis, MinIO, etcd, Milvus, Attu)
+```bash
+docker compose up -d postgres redis minio etcd milvus attu
+```
+
+### 3. Run backend
+```bash
+make backend-install
+cd backend && uvicorn app.main:app --reload
+```
+Backend listens on `http://localhost:8000`. Prometheus metrics at `/metrics`.
+
+### 4. Run frontend
+```bash
+make frontend-install
+cd frontend && npm run dev
+```
+Console listens on `http://localhost:5173`.
+
+### 5. Try it
+1. Open the **知识库管理** (Knowledge) tab and upload a DOCX or PDF.
+2. Wait for the ingestion job to flip to `已完成` (done).
+3. Switch to **政策问答** (Q&A) and ask a question — answers come back with citations,
+   confidence scores and a retrieval trace.
+4. Switch to **评测运行** (Eval) and run the bundled `zh-policy-smoke` dataset.
+5. Plug in a real `OpenAI-compatible` gateway via `LLM_*` / `EMBEDDING_*` env vars to replace
+   the deterministic local fallback. The system always falls back to local providers when
+   gateway credentials are missing — local development never breaks.
+
+### Tests
+```bash
+make test           # backend + frontend
+make test-backend   # pytest only
+make test-frontend  # vitest only
+```
+
+### Project layout
+```
+backend/    FastAPI app (routes, services, agents, RAG, eval, db models)
+frontend/   React + Vite operations console
+infra/      Dockerfiles, docker-compose, Kubernetes manifests
+docs/       Architecture review, plans, reports, knowledge base samples
+```
+
+See [`docs/architecture-review.md`](docs/architecture-review.md) for the full architectural deep dive
+and [`docs/plans/`](docs/plans) for iteration history.
+
+Contributions are welcome — see [`CONTRIBUTING.md`](CONTRIBUTING.md) before opening a PR.
+
+---
+
+## 项目简介（中文）
 
 基于差旅场景的企业级 `RAG + Agent` 项目。当前主线已经完成 `Task 1` 到 `Task 8` 的最小可落地版本，并继续进入下一轮质量升级：把 demo 级模型链路改造成“真实模型网关 + 本地回退”的结构。
 
