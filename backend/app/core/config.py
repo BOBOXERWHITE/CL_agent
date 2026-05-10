@@ -131,6 +131,15 @@ class Settings:
     query_rewrite_llm_enabled: bool
     query_rewrite_llm_variants: int
     hyde_enabled: bool
+    # CRAG (Stage 3): after initial retrieval, ask the LLM whether evidence
+    # is sufficient. If not, the engine re-retrieves with the evaluator's
+    # suggested queries and merges results. ``crag_max_rounds`` caps the
+    # extra retrieval rounds; anti-loop guards in the engine break early
+    # when missing aspects don't change or no new chunks are added.
+    crag_enabled: bool
+    crag_max_rounds: int
+    crag_sufficiency_threshold: float
+    crag_evaluator_timeout_seconds: float
     # Agent router (P3.2). Three strategies; each falls back to the next:
     #   llm       — LLM classifies intent (most flexible, costs tokens)
     #   embedding — compute similarity against intent exemplars (no LLM calls)
@@ -141,6 +150,10 @@ class Settings:
     chunk_overlap: int
     chat_top_k: int
     chat_confidence_threshold: float
+    # P11: how many prior (user, assistant) turns to load from ChatMessage
+    # and prepend to the LLM messages array. Caps the prompt growth; set
+    # to 0 to disable multi-turn context entirely.
+    chat_history_max_turns: int
     rag_dense_candidate_multiplier: int
     rag_lexical_candidate_multiplier: int
     rag_rrf_k: int
@@ -161,6 +174,15 @@ class Settings:
     # P5.5: task_run cleanup retention. 0 or negative disables the cron
     # so dev environments never have rows deleted automatically.
     task_run_retention_days: int
+    # Eval LLM-as-judge (P0). When ``eval_judge_enabled`` is True, the
+    # eval runner asks an LLM to grade ``answer_correctness`` and
+    # ``faithfulness`` instead of relying on keyword AND-matching alone.
+    # Disabled by default so dev / CI without a real gateway keeps the
+    # current keyword behaviour. ``eval_judge_model_name`` falls back to
+    # ``llm_model_name`` when empty so most callers never need to set it.
+    eval_judge_enabled: bool
+    eval_judge_model_name: str
+    eval_judge_timeout_seconds: float
 
 
 @lru_cache(maxsize=1)
@@ -241,10 +263,15 @@ def get_settings() -> Settings:
         query_rewrite_llm_enabled=_as_bool(os.getenv("QUERY_REWRITE_LLM_ENABLED"), default=False),
         query_rewrite_llm_variants=int(os.getenv("QUERY_REWRITE_LLM_VARIANTS", "2")),
         hyde_enabled=_as_bool(os.getenv("HYDE_ENABLED"), default=False),
+        crag_enabled=_as_bool(os.getenv("CRAG_ENABLED"), default=False),
+        crag_max_rounds=int(os.getenv("CRAG_MAX_ROUNDS", "2")),
+        crag_sufficiency_threshold=float(os.getenv("CRAG_SUFFICIENCY_THRESHOLD", "0.7")),
+        crag_evaluator_timeout_seconds=float(os.getenv("CRAG_EVALUATOR_TIMEOUT_SECONDS", "8.0")),
         chunk_size=int(os.getenv("CHUNK_SIZE", "450")),
         chunk_overlap=int(os.getenv("CHUNK_OVERLAP", "1")),
         chat_top_k=int(os.getenv("CHAT_TOP_K", "3")),
         chat_confidence_threshold=float(os.getenv("CHAT_CONFIDENCE_THRESHOLD", "0.2")),
+        chat_history_max_turns=max(0, int(os.getenv("CHAT_HISTORY_MAX_TURNS", "5"))),
         rag_dense_candidate_multiplier=int(os.getenv("RAG_DENSE_CANDIDATE_MULTIPLIER", "3")),
         rag_lexical_candidate_multiplier=int(os.getenv("RAG_LEXICAL_CANDIDATE_MULTIPLIER", "12")),
         rag_rrf_k=int(os.getenv("RAG_RRF_K", "60")),
@@ -260,4 +287,7 @@ def get_settings() -> Settings:
         otel_exporter_otlp_endpoint=os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT", "").strip(),
         otel_exporter_otlp_headers=os.getenv("OTEL_EXPORTER_OTLP_HEADERS", "").strip(),
         task_run_retention_days=int(os.getenv("TASK_RUN_RETENTION_DAYS") or "90"),
+        eval_judge_enabled=_as_bool(os.getenv("EVAL_JUDGE_ENABLED"), default=False),
+        eval_judge_model_name=os.getenv("EVAL_JUDGE_MODEL_NAME", "").strip(),
+        eval_judge_timeout_seconds=float(os.getenv("EVAL_JUDGE_TIMEOUT_SECONDS", "20.0")),
     )

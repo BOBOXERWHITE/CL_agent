@@ -22,9 +22,13 @@ backend-start.err.log
 frontend-start.log
 frontend-start.err.log
 
-# Local data
-data/
-backend/data/
+# Local runtime data (object-store cache, ingestion temp files, etc.)
+# NOTE: keep this narrow — backend/data/eval/ holds versioned eval datasets
+# and must stay in source control. Add new runtime subdirs explicitly.
+/data/
+backend/data/object-store/
+backend/data/uploads/
+backend/data/cache/
 
 # Environment files
 # - .env, .env.local, .env.*.local always contain real secrets and must stay local.

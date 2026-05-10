@@ -1,0 +1,6 @@
+{"question": "L2 普通员工去北京（A 档）出差，每晚住宿费上限是多少？", "tenant_id": "t1", "customer_id": "c1", "expected_citation": "L2 普通员工", "expected_answer_keywords": ["L2", "700"]}
+{"question": "员工实际入住 760 元/晚的酒店，超过 L2 普通员工在北京的标准 8.6%，应按哪一档处理？", "tenant_id": "t1", "customer_id": "c1", "expected_citation": "房费超标 ≤10%", "expected_answer_keywords": ["警告", "超额自付"]}
+{"question": "差旅采用定额制时，含早酒店在早餐补贴上应该如何处理？", "tenant_id": "t1", "customer_id": "c1", "expected_citation": "扣减\"早餐补贴\"", "expected_answer_keywords": ["扣减", "早餐"]}
+{"question": "周五入住、周一离店的酒店报销需要补交什么材料？", "tenant_id": "t1", "customer_id": "c1", "expected_citation": "周五入住周一离店", "expected_answer_keywords": ["公务", "证明"]}
+{"question": "酒店发票包含住宿费和餐饮费，进项税应该怎么抵扣？", "tenant_id": "t1", "customer_id": "c1", "expected_citation": "餐饮服务", "expected_answer_keywords": ["住宿", "餐饮", "不可抵扣"]}
+{"question": "L2 普通员工去北京出差，周五入住周一离店，酒店 760 元/晚、含早，发票是公司抬头并带税号，项目分成了住宿费和餐饮费。这单哪些地方合规，哪些地方需要审批或说明，早餐补贴和进项税该怎么处理？", "tenant_id": "t1", "customer_id": "c1", "expected_citation": "L2 普通员工", "expected_answer_keywords": ["700", "超额自付", "公务", "扣减", "餐饮"]}

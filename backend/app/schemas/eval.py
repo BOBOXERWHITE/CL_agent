@@ -21,6 +21,13 @@ class EvalDetailPayload(BaseModel):
     expected_citation_rank: int | None = None
     low_confidence: bool
     citations: list[str] = Field(default_factory=list)
+    # P0: per-sample LLM-as-judge breakdown. Defaults preserve backward
+    # compatibility for legacy eval_run rows persisted before the judge
+    # was added (judge_* fields will simply be missing from metrics_json).
+    judge_answer_correct: bool = False
+    judge_faithfulness: float = 0.0
+    judge_reasoning: str = ""
+    judge_fallback_used: bool = True
 
 
 class EvalProviderSnapshotPayload(BaseModel):
@@ -42,6 +49,14 @@ class EvalMetricsPayload(BaseModel):
     quality_gate: str | None = None
     quality_gate_reasons: list[str] = Field(default_factory=list)
     provider_snapshot: EvalProviderSnapshotPayload | None = None
+    # P0: LLM-as-judge metrics, RAGAS-aligned naming. Default 0.0 so old
+    # rows persisted before the judge shipped still validate cleanly.
+    # ``judge_fallback_rate`` = fraction of samples graded by keyword
+    # fallback (judge disabled or LLM call failed) — useful to disclose
+    # how much of the headline number came from the LLM vs. a string match.
+    judge_answer_correctness: float = 0.0
+    faithfulness: float = 0.0
+    judge_fallback_rate: float = 1.0
 
 
 class EvalRunPayload(BaseModel):
