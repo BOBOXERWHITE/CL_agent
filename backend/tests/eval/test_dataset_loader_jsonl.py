@@ -147,3 +147,31 @@ def test_mixed_domain_dataset_keeps_three_samples() -> None:
     with SessionLocal() as session:
         dataset = ensure_builtin_eval_dataset(session, dataset_name="zh-policy-mixed-domain")
     assert len(dataset.samples_json) == 3
+
+
+def test_hotel_full_dataset_has_at_least_50_samples() -> None:
+    """The expanded P1 dataset is the one users should run for
+    statistically meaningful A/B comparisons. Guard the line count so
+    a stray missing newline can't silently drop us back under 50."""
+    init_db()
+    with SessionLocal() as session:
+        dataset = ensure_builtin_eval_dataset(session, dataset_name="zh-policy-hotel-full")
+    assert len(dataset.samples_json) >= 50
+
+
+def test_hotel_full_samples_carry_required_keys() -> None:
+    """Every sample must carry the keys the runner reads. Missing
+    ``tenant_id`` / ``customer_id`` would silently route the eval to
+    the wrong RLS scope and produce a 0-citation run."""
+    init_db()
+    with SessionLocal() as session:
+        dataset = ensure_builtin_eval_dataset(session, dataset_name="zh-policy-hotel-full")
+    required = {"question", "tenant_id", "customer_id", "expected_citation"}
+    for index, sample in enumerate(dataset.samples_json):
+        missing = required - set(sample.keys())
+        assert not missing, f"sample #{index} is missing required keys: {missing}"
+        # expected_answer_keywords is optional but, when present, must be a list
+        kws = sample.get("expected_answer_keywords")
+        assert kws is None or isinstance(kws, list), (
+            f"sample #{index} expected_answer_keywords must be a list, got {type(kws).__name__}"
+        )

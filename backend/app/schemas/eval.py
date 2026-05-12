@@ -28,6 +28,10 @@ class EvalDetailPayload(BaseModel):
     judge_faithfulness: float = 0.0
     judge_reasoning: str = ""
     judge_fallback_used: bool = True
+    # P1: RAGAS-aligned per-sample context metrics. Defaults to 0 so
+    # legacy rows persisted before P1 still validate cleanly.
+    context_precision: float = 0.0
+    context_recall: float = 0.0
 
 
 class EvalProviderSnapshotPayload(BaseModel):
@@ -57,6 +61,14 @@ class EvalMetricsPayload(BaseModel):
     judge_answer_correctness: float = 0.0
     faithfulness: float = 0.0
     judge_fallback_rate: float = 1.0
+    # P1: RAGAS-aligned dataset-level context metrics.
+    # context_precision: how concentrated are relevant chunks at the
+    # top of retrieval (1.0 = all relevant chunks ranked first).
+    # context_recall: fraction of expected keyword atoms reached by
+    # the union of retrieved chunks (1.0 = every gold fact made it
+    # into the LLM's context window).
+    context_precision: float = 0.0
+    context_recall: float = 0.0
 
 
 class EvalRunPayload(BaseModel):

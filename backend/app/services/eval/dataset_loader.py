@@ -65,6 +65,16 @@ BUILTIN_DATASET_REGISTRY: dict[str, DatasetSpec] = {
         description="酒店知识库多跳问答评测集：5 个原子 hop + 1 个组合多跳问题",
         path=_EVAL_DATA_DIR / "zh-policy-hotel-multihop.jsonl",
     ),
+    # P1 expansion (2026-05): 50+ atomic questions across 7 hotel-ops
+    # domains — rate plans, cancellation, no-show, overbooking, China
+    # invoicing tax, reimbursement compliance, loyalty programs, and
+    # the consolidated decision tables. Big enough that A/B comparisons
+    # between retrieval / model configurations are statistically
+    # meaningful instead of noise.
+    "zh-policy-hotel-full": DatasetSpec(
+        description="酒店运营完整评测集：50+ 道原子题，覆盖房价/取消/超售/发票/差标/会员/决策表",
+        path=_EVAL_DATA_DIR / "zh-policy-hotel-full.jsonl",
+    ),
 }
 
 

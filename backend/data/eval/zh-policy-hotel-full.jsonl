@@ -1,0 +1,56 @@
+{"question": "BAR 价格码代表什么含义？", "tenant_id": "t1", "customer_id": "c1", "expected_citation": "最优可售价", "expected_answer_keywords": ["BAR", "动态"]}
+{"question": "早鸟价 NRF7/14/21 相比 BAR 一般能节省多少？", "tenant_id": "t1", "customer_id": "c1", "expected_citation": "提前 7/14/21 日", "expected_answer_keywords": ["8", "25"]}
+{"question": "中国住宿服务一般纳税人的增值税率是多少？", "tenant_id": "t1", "customer_id": "c1", "expected_citation": "生活服务-住宿服务", "expected_answer_keywords": ["6%", "一般纳税人"]}
+{"question": "拉斯维加斯酒店的 Resort Fee 是否计入 OTA 排序使用的 Total？", "tenant_id": "t1", "customer_id": "c1", "expected_citation": "Resort Fee USD 39", "expected_answer_keywords": ["不计入", "Total"]}
+{"question": "法国巴黎的 Taxe de Séjour 上下限是多少欧元？", "tenant_id": "t1", "customer_id": "c1", "expected_citation": "Taxe de Séjour", "expected_answer_keywords": ["0.65", "14.95"]}
+{"question": "日本东京的宿泊税起征房价门槛是多少日元？", "tenant_id": "t1", "customer_id": "c1", "expected_citation": "宿泊税", "expected_answer_keywords": ["10,000", "JPY"]}
+{"question": "德国柏林的 City Tax 是按房价的多少比例征收的？", "tenant_id": "t1", "customer_id": "c1", "expected_citation": "City Tax", "expected_answer_keywords": ["5%"]}
+{"question": "Refundable + 24h Free 政策下，距离入住前 24 小时以上取消的违约金是多少？", "tenant_id": "t1", "customer_id": "c1", "expected_citation": "Refundable + 24h Free", "expected_answer_keywords": ["0", "全退"]}
+{"question": "Non-Refundable (NRF) 政策下订单能否改签？", "tenant_id": "t1", "customer_id": "c1", "expected_citation": "Non-Refundable", "expected_answer_keywords": ["不可改"]}
+{"question": "取消阶梯里，距离入住 ≥72h 通常的违约金是多少？", "tenant_id": "t1", "customer_id": "c1", "expected_citation": "距入住 ≥ 72 h", "expected_answer_keywords": ["免费"]}
+{"question": "取消阶梯里，距入住 <24h 时通常收取的违约金是多少？", "tenant_id": "t1", "customer_id": "c1", "expected_citation": "< 24 h", "expected_answer_keywords": ["全程房费", "税"]}
+{"question": "中国境内取消政策的时间锚点通常以什么时间为准？", "tenant_id": "t1", "customer_id": "c1", "expected_citation": "24:00 (UTC+8)", "expected_answer_keywords": ["24:00", "国内"]}
+{"question": "如果 OTA 显示入住前 24 小时免费取消，但酒店写当日中午 12:00 前免费，以哪一方条款为准？", "tenant_id": "t1", "customer_id": "c1", "expected_citation": "OTA 实际下单时合同条款为准", "expected_answer_keywords": ["OTA", "合同"]}
+{"question": "Semi-Refundable 政策下取消通常收取多少比例的违约金？", "tenant_id": "t1", "customer_id": "c1", "expected_citation": "Semi-Refundable", "expected_answer_keywords": ["50%"]}
+{"question": "No-Show 的标准判定条件是什么？", "tenant_id": "t1", "customer_id": "c1", "expected_citation": "已担保订单", "expected_answer_keywords": ["担保", "24:00"]}
+{"question": "No-Show 订单的默认罚金计算公式包含哪些组成部分？", "tenant_id": "t1", "customer_id": "c1", "expected_citation": "default_noshow_fee", "expected_answer_keywords": ["首晚房费", "税"]}
+{"question": "因航班取消导致 No-Show 时，能否申请豁免？需要什么证明材料？", "tenant_id": "t1", "customer_id": "c1", "expected_citation": "航班 / 高铁取消或延误", "expected_answer_keywords": ["豁免", "行程单"]}
+{"question": "多数集团或中端酒店的早离 (Early Departure) 罚金一般是多少？", "tenant_id": "t1", "customer_id": "c1", "expected_citation": "多数集团 / 中端", "expected_answer_keywords": ["1 晚房费"]}
+{"question": "高端度假村的早离罚金通常是怎么计算的？", "tenant_id": "t1", "customer_id": "c1", "expected_citation": "高端度假村", "expected_answer_keywords": ["全程房费"]}
+{"question": "ETA 超过 18:00 仍未提供延迟入住通知时，系统会标记什么风险？", "tenant_id": "t1", "customer_id": "c1", "expected_citation": "late_checkin_at_risk", "expected_answer_keywords": ["释放", "风险"]}
+{"question": "酒店超售的主要原因之一是 No-Show 率约为多少？", "tenant_id": "t1", "customer_id": "c1", "expected_citation": "No-Show 率", "expected_answer_keywords": ["5", "8"]}
+{"question": "被酒店 Walk 时，通常会被优先换出的是哪类客人？", "tenant_id": "t1", "customer_id": "c1", "expected_citation": "一晚客", "expected_answer_keywords": ["散客", "BAR"]}
+{"question": "被 Walk 时应当向酒店争取的标准补救包含哪些核心项？", "tenant_id": "t1", "customer_id": "c1", "expected_citation": "第一晚酒店全免", "expected_answer_keywords": ["同档", "全免"]}
+{"question": "钻石/钛金高级会员被 Walk 时可以额外争取多少集团积分？", "tenant_id": "t1", "customer_id": "c1", "expected_citation": "50,000–80,000 集团积分", "expected_answer_keywords": ["50,000", "80,000"]}
+{"question": "Walk 决策表里，对同档酒店且距离 ≤3km 的换房方案应该如何处理？", "tenant_id": "t1", "customer_id": "c1", "expected_citation": "同档酒店 ≤3km", "expected_answer_keywords": ["接受", "全免"]}
+{"question": "数电发票（全电发票）的发票号码是多少位？", "tenant_id": "t1", "customer_id": "c1", "expected_citation": "20 位", "expected_answer_keywords": ["20"]}
+{"question": "增值税普通发票能否用于抵扣进项税？", "tenant_id": "t1", "customer_id": "c1", "expected_citation": "不可抵扣进项税", "expected_answer_keywords": ["不可抵扣"]}
+{"question": "个人抬头的住宿发票是否需要提供税号？", "tenant_id": "t1", "customer_id": "c1", "expected_citation": "个人抬头：仅需姓名", "expected_answer_keywords": ["个人", "姓名"]}
+{"question": "自什么时间起，企业索取增值税普通发票必须提供税号？", "tenant_id": "t1", "customer_id": "c1", "expected_citation": "2017 年 7 月 1 日", "expected_answer_keywords": ["2017"]}
+{"question": "长期租赁（超过 30 日）的增值税率是多少？", "tenant_id": "t1", "customer_id": "c1", "expected_citation": "不动产经营租赁", "expected_answer_keywords": ["9%"]}
+{"question": "中国小规模纳税人的年销售额上限是多少？", "tenant_id": "t1", "customer_id": "c1", "expected_citation": "小规模纳税人", "expected_answer_keywords": ["500 万"]}
+{"question": "中国餐饮服务一般纳税人的增值税率是多少？", "tenant_id": "t1", "customer_id": "c1", "expected_citation": "餐饮服务税率", "expected_answer_keywords": ["6%"]}
+{"question": "L4 经理在上海（A 档）出差时每晚住宿费上限是多少元？", "tenant_id": "t1", "customer_id": "c1", "expected_citation": "L4 经理", "expected_answer_keywords": ["1,200"]}
+{"question": "L3 资深主管在 C 档城市的住宿费上限是多少元？", "tenant_id": "t1", "customer_id": "c1", "expected_citation": "L3 资深", "expected_answer_keywords": ["450"]}
+{"question": "L5 总监在海外 D 档城市每晚住宿费上限是多少美金？", "tenant_id": "t1", "customer_id": "c1", "expected_citation": "L5 高级经理", "expected_answer_keywords": ["400", "USD"]}
+{"question": "L1 实习生/一线员工在 B 档城市的住宿费上限是多少元？", "tenant_id": "t1", "customer_id": "c1", "expected_citation": "L1 实习", "expected_answer_keywords": ["350"]}
+{"question": "房费超标 11–30% 时按什么流程处理？", "tenant_id": "t1", "customer_id": "c1", "expected_citation": "房费超标 11–30%", "expected_answer_keywords": ["主管审批", "超额自付"]}
+{"question": "房费超标 >30% 时按什么流程处理？", "tenant_id": "t1", "customer_id": "c1", "expected_citation": "房费超标 >30%", "expected_answer_keywords": ["HR 审批", "全额自付"]}
+{"question": "不走 OBT/TMC 预订会有什么处罚？", "tenant_id": "t1", "customer_id": "c1", "expected_citation": "不走 OBT / TMC", "expected_answer_keywords": ["主管审批", "失去协议价"]}
+{"question": "报销发票必备凭证应该包含哪些信息？", "tenant_id": "t1", "customer_id": "c1", "expected_citation": "抬头、税号、项目", "expected_answer_keywords": ["抬头", "税号"]}
+{"question": "L1–L4 级别是否享受行政房或行政酒廊待遇？", "tenant_id": "t1", "customer_id": "c1", "expected_citation": "L1–L4", "expected_answer_keywords": ["否"]}
+{"question": "Marriott Bonvoy Titanium Elite 等级的年度间夜门槛是多少？", "tenant_id": "t1", "customer_id": "c1", "expected_citation": "Titanium Elite", "expected_answer_keywords": ["75"]}
+{"question": "Marriott Ambassador Elite 等级需要满足哪两个条件？", "tenant_id": "t1", "customer_id": "c1", "expected_citation": "Ambassador Elite", "expected_answer_keywords": ["100 晚", "23,000"]}
+{"question": "Hilton Honors Diamond 等级的年度间夜门槛是多少？", "tenant_id": "t1", "customer_id": "c1", "expected_citation": "Diamond", "expected_answer_keywords": ["60"]}
+{"question": "World of Hyatt Globalist 等级的年度间夜门槛是多少？", "tenant_id": "t1", "customer_id": "c1", "expected_citation": "Globalist", "expected_answer_keywords": ["60"]}
+{"question": "Marriott Bonvoy 基础消费 1 美元对应多少积分？", "tenant_id": "t1", "customer_id": "c1", "expected_citation": "1 美元 = 10 积分", "expected_answer_keywords": ["10", "积分"]}
+{"question": "周五入住周一离店的酒店报销需要补充哪类材料？", "tenant_id": "t1", "customer_id": "c1", "expected_citation": "周五入住周一离店", "expected_answer_keywords": ["公务"]}
+{"question": "节假日入住的酒店报销审批要求是什么？", "tenant_id": "t1", "customer_id": "c1", "expected_citation": "节假日入住", "expected_answer_keywords": ["严审批"]}
+{"question": "同行且为异性的入住能否报销？", "tenant_id": "t1", "customer_id": "c1", "expected_citation": "同行 + 异性", "expected_answer_keywords": ["否"]}
+{"question": "酒店加床费能否报销？", "tenant_id": "t1", "customer_id": "c1", "expected_citation": "加床", "expected_answer_keywords": ["自费"]}
+{"question": "跨年发票最迟在什么时间前必须清账？", "tenant_id": "t1", "customer_id": "c1", "expected_citation": "5 月 31 日", "expected_answer_keywords": ["5 月 31 日"]}
+{"question": "含 SPA 或高尔夫的套餐能否纳入差旅报销？", "tenant_id": "t1", "customer_id": "c1", "expected_citation": "含 SPA / 高尔夫", "expected_answer_keywords": ["否", "套餐"]}
+{"question": "钟点房费用能否纳入差旅报销？", "tenant_id": "t1", "customer_id": "c1", "expected_citation": "钟点房", "expected_answer_keywords": ["否"]}
+{"question": "对于 Non-Refundable 订单遇到不可抗力的情况，应如何处理？", "tenant_id": "t1", "customer_id": "c1", "expected_citation": "不可抗力", "expected_answer_keywords": ["豁免", "Goodwill"]}
+{"question": "VIP/客户接待场景下推荐使用什么价格码和支付方式？", "tenant_id": "t1", "customer_id": "c1", "expected_citation": "VIP / 客户接待", "expected_answer_keywords": ["协议价"]}
+{"question": "长期项目驻地住宿推荐什么价格码和结算方式？", "tenant_id": "t1", "customer_id": "c1", "expected_citation": "长期项目驻地", "expected_answer_keywords": ["连住", "月结"]}

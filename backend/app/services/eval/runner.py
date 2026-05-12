@@ -7,6 +7,7 @@ from sqlalchemy import select
 from app.db.models.eval import EvalDataset, EvalRun
 from app.db.session import bypass_rls_session, init_db
 from app.services.eval.llm_judge import JudgeVerdict, judge_answer
+from app.services.eval.retrieval_metrics import context_precision, context_recall
 from app.services.rag.query_engine import answer_policy_question
 from app.services.system_settings import get_runtime_settings
 
@@ -82,6 +83,33 @@ def _build_quality_gate(
     return "fail", reasons
 
 
+def _per_chunk_relevance(
+    citation_full_texts: list[str],
+    expected_citation: str,
+    expected_keywords: list[str],
+) -> list[bool]:
+    """Mark each retrieved chunk relevant or not, in rank order.
+
+    A chunk is relevant if it contains the gold citation substring OR
+    at least one expected keyword. Keyword OR-match keeps the metric
+    informative when ``expected_citation`` is a short anchor phrase
+    that only the first hit happens to include — the surrounding
+    paragraphs are still useful context if they carry the supporting
+    keywords. Empty inputs degenerate to "no chunk is relevant".
+    """
+    if not citation_full_texts:
+        return []
+    haystacks_lower = [text.lower() for text in citation_full_texts]
+    citation_lower = expected_citation.lower().strip()
+    keyword_terms = [kw.strip().lower() for kw in expected_keywords if kw.strip()]
+    marks: list[bool] = []
+    for text_lower in haystacks_lower:
+        citation_hit = bool(citation_lower) and citation_lower in text_lower
+        keyword_hit = any(kw in text_lower for kw in keyword_terms)
+        marks.append(citation_hit or keyword_hit)
+    return marks
+
+
 def _build_eval_detail(
     sample: dict[str, object],
     result,
@@ -90,6 +118,8 @@ def _build_eval_detail(
     answer_matched: bool,
     expected_citation_rank: int | None,
     judge_verdict: JudgeVerdict,
+    sample_context_precision: float,
+    sample_context_recall: float,
 ) -> dict[str, object]:
     return {
         "question": str(sample["question"]),
@@ -111,6 +141,12 @@ def _build_eval_detail(
         "judge_faithfulness": round(judge_verdict.faithfulness, 4),
         "judge_reasoning": judge_verdict.reasoning,
         "judge_fallback_used": judge_verdict.fallback_used,
+        # P1: RAGAS-aligned context metrics, per-sample. Lets the UI
+        # explain "retrieval found the right chunk but pulled 4 noise
+        # chunks with it" (low precision) vs. "retrieval missed an
+        # atom needed to answer" (low recall).
+        "context_precision": round(sample_context_precision, 4),
+        "context_recall": round(sample_context_recall, 4),
     }
 
 
@@ -135,6 +171,10 @@ def run_eval(eval_dataset_id: str) -> EvalRun:
         judge_correct_hits = 0
         faithfulness_sum = 0.0
         judge_fallback_count = 0
+        # P1: per-sample context_precision / context_recall sums. The
+        # mean across samples becomes the dataset-level RAGAS metric.
+        context_precision_sum = 0.0
+        context_recall_sum = 0.0
         details: list[dict[str, object]] = []
 
         for sample in samples:
@@ -187,6 +227,19 @@ def run_eval(eval_dataset_id: str) -> EvalRun:
             if judge_verdict.fallback_used:
                 judge_fallback_count += 1
 
+            # P1: RAGAS-aligned context metrics computed on the same
+            # retrieved chunks the LLM saw. Relevance signal is the
+            # gold citation substring OR any expected keyword — cheap,
+            # no extra LLM cost, and distinguishes "right chunk found"
+            # from "right chunk found alongside 3 noise chunks".
+            relevance_marks = _per_chunk_relevance(
+                citation_full_texts, expected_citation, expected_keywords
+            )
+            sample_context_precision = context_precision(relevance_marks)
+            sample_context_recall = context_recall(citation_full_texts, expected_keywords)
+            context_precision_sum += sample_context_precision
+            context_recall_sum += sample_context_recall
+
             details.append(
                 _build_eval_detail(
                     sample,
@@ -195,6 +248,8 @@ def run_eval(eval_dataset_id: str) -> EvalRun:
                     answer_matched=answer_matched,
                     expected_citation_rank=citation_rank,
                     judge_verdict=judge_verdict,
+                    sample_context_precision=sample_context_precision,
+                    sample_context_recall=sample_context_recall,
                 )
             )
 
@@ -206,6 +261,8 @@ def run_eval(eval_dataset_id: str) -> EvalRun:
         judge_answer_correctness = _safe_ratio(judge_correct_hits, len(samples))
         faithfulness = round(faithfulness_sum / len(samples), 4) if samples else 0.0
         judge_fallback_rate = _safe_ratio(judge_fallback_count, len(samples))
+        mean_context_precision = round(context_precision_sum / len(samples), 4) if samples else 0.0
+        mean_context_recall = round(context_recall_sum / len(samples), 4) if samples else 0.0
         quality_gate, quality_gate_reasons = _build_quality_gate(
             answer_correctness=answer_correctness,
             citation_hit_rate=citation_hit_rate,
@@ -234,6 +291,16 @@ def run_eval(eval_dataset_id: str) -> EvalRun:
                 "judge_answer_correctness": judge_answer_correctness,
                 "faithfulness": faithfulness,
                 "judge_fallback_rate": judge_fallback_rate,
+                # P1: RAGAS-aligned dataset-level context quality.
+                # context_precision = mean(weighted P@k where relevance =
+                # gold substring or expected keyword in chunk). Tells you
+                # how much of the retrieved top-k is signal vs. noise.
+                # context_recall = mean(fraction of expected keywords
+                # found in the union of retrieved chunks). Tells you
+                # whether retrieval ever reached the atoms the answer
+                # needs.
+                "context_precision": mean_context_precision,
+                "context_recall": mean_context_recall,
                 "quality_gate": quality_gate,
                 "quality_gate_reasons": quality_gate_reasons,
                 "provider_snapshot": {
