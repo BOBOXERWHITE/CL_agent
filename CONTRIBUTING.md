@@ -85,6 +85,47 @@ PR description should include:
 We aim for **80%+ coverage** on new business logic. Pure scaffolding code can be exempt with a
 note in the PR description.
 
+## Eval regression gate
+
+Every PR that touches `backend/app/services/eval/**`, `backend/app/schemas/eval.py`,
+`backend/data/eval/**`, or `backend/scripts/eval_gate_cli.py` is run through the
+**Eval Gate** workflow (`.github/workflows/eval-gate.yml`):
+
+1. `eval-unit-tests` — runs `pytest backend/tests/eval/` against deterministic
+   providers (no real LLM / embedding calls). Must be green.
+2. `eval-gate-demo` — feeds a sample regressed `metrics.json` through
+   `backend/scripts/eval_gate_cli.py` so reviewers can see what the GitHub
+   Actions summary card looks like.
+
+### Wiring your own pipeline
+
+The CLI is the bridge between an `EvalRun`'s metrics and a CI exit code:
+
+```bash
+# From a file:
+python backend/scripts/eval_gate_cli.py metrics.json
+
+# From stdin (curl / jq / pipe):
+curl -s "$EVAL_API_URL/api/evals/runs/$RUN_ID" \
+  | jq .metrics \
+  | python backend/scripts/eval_gate_cli.py --stdin
+
+# Strict mode: treat 'warn' as a failure (exit 2).
+python backend/scripts/eval_gate_cli.py --strict metrics.json
+```
+
+Exit codes:
+
+| Code | Meaning |
+| ---: | --- |
+| 0 | Both `quality_gate` and `regression_gate` are `pass` (or unknown) |
+| 1 | Either gate is `fail` |
+| 2 | Either gate is `warn` and `--strict` was passed |
+| 64 | Input error (invalid JSON, missing file) — distinct from a real regression |
+
+When `GITHUB_STEP_SUMMARY` is set, the CLI also appends a markdown summary to it
+so the gate result renders natively as a workflow summary card.
+
 ## Coding style
 
 - **Python**: PEP 8, type hints required on public functions, formatted by `ruff format`.
