@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import asdict
 from uuid import uuid4
 
 from sqlalchemy import select
@@ -7,6 +8,7 @@ from sqlalchemy import select
 from app.db.models.eval import EvalDataset, EvalRun
 from app.db.session import bypass_rls_session, init_db
 from app.services.eval.llm_judge import JudgeVerdict, judge_answer
+from app.services.eval.regression import compute_regression_diff
 from app.services.eval.retrieval_metrics import context_precision, context_recall
 from app.services.rag.query_engine import answer_policy_question
 from app.services.system_settings import get_runtime_settings
@@ -283,6 +285,44 @@ def run_eval(eval_dataset_id: str) -> EvalRun:
             retrieval_mrr=retrieval_mrr,
             low_confidence_rate=low_confidence_rate,
         )
+
+        # P3: cross-run regression diff. Find the most recent completed
+        # run for this dataset (excluding the current one, which hasn't
+        # been committed yet) and diff each headline metric. The result
+        # populates a second-tier ``regression_gate`` that CI can use
+        # to fail PRs that ship a worse system even when absolute
+        # thresholds still pass.
+        previous_run = session.execute(
+            select(EvalRun)
+            .where(EvalRun.dataset_name == dataset.name)
+            .where(EvalRun.status == "completed")
+            .order_by(EvalRun.created_at.desc())
+            .limit(1)
+        ).scalar_one_or_none()
+        current_metrics_for_diff = {
+            "answer_correctness": answer_correctness,
+            "citation_hit_rate": citation_hit_rate,
+            "retrieval_mrr": retrieval_mrr,
+            "low_confidence_rate": low_confidence_rate,
+            "judge_answer_correctness": judge_answer_correctness,
+            "faithfulness": faithfulness,
+            "context_precision": mean_context_precision,
+            "context_recall": mean_context_recall,
+            "judge_cost_usd_total": round(judge_cost_usd_total, 6),
+        }
+        regression_diff = compute_regression_diff(
+            current=current_metrics_for_diff,
+            previous=previous_run.metrics_json if previous_run else None,
+            previous_run_id=previous_run.id if previous_run else None,
+        )
+        regression_payload = {
+            "has_previous": regression_diff.has_previous,
+            "previous_run_id": regression_diff.previous_run_id,
+            "regression_gate": regression_diff.regression_gate,
+            "regression_reasons": list(regression_diff.regression_reasons),
+            "deltas": [asdict(delta) for delta in regression_diff.deltas],
+        }
+
         eval_run = EvalRun(
             id=str(uuid4()),
             dataset_id=dataset.id,
@@ -323,6 +363,11 @@ def run_eval(eval_dataset_id: str) -> EvalRun:
                 "judge_prompt_tokens_total": judge_prompt_tokens_total,
                 "judge_completion_tokens_total": judge_completion_tokens_total,
                 "judge_cost_usd_total": round(judge_cost_usd_total, 6),
+                # P3: cross-run regression diff. Empty deltas + pass
+                # on the first run for a given dataset; populated with
+                # per-metric delta entries + a regression_gate on every
+                # subsequent run.
+                "regression": regression_payload,
                 "quality_gate": quality_gate,
                 "quality_gate_reasons": quality_gate_reasons,
                 "provider_snapshot": {

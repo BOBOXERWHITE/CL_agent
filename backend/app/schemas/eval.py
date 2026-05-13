@@ -48,6 +48,34 @@ class EvalProviderSnapshotPayload(BaseModel):
     vector_store_provider: str
 
 
+class RegressionDeltaPayload(BaseModel):
+    """One metric's current-vs-previous comparison."""
+
+    name: str
+    current: float
+    previous: float
+    delta: float
+    direction: str
+    regressed: bool
+    threshold: float
+
+
+class RegressionDiffPayload(BaseModel):
+    """Cross-run regression summary (P3).
+
+    ``has_previous=False`` on the first run for a dataset; the UI should
+    suppress the diff card in that case. ``regression_gate`` is the
+    secondary gate CI can wire into a PR check, orthogonal to the
+    absolute-threshold ``quality_gate``.
+    """
+
+    has_previous: bool = False
+    previous_run_id: str | None = None
+    regression_gate: str = "pass"
+    regression_reasons: list[str] = Field(default_factory=list)
+    deltas: list[RegressionDeltaPayload] = Field(default_factory=list)
+
+
 class EvalMetricsPayload(BaseModel):
     answer_correctness: float = 0.0
     answer_recall: float = 0.0
@@ -81,6 +109,9 @@ class EvalMetricsPayload(BaseModel):
     judge_prompt_tokens_total: int = 0
     judge_completion_tokens_total: int = 0
     judge_cost_usd_total: float = 0.0
+    # P3: cross-run regression diff. Default suppresses the UI on
+    # legacy persisted rows (which never went through the diff).
+    regression: RegressionDiffPayload | None = None
 
 
 class EvalRunPayload(BaseModel):
