@@ -141,6 +141,11 @@ def _build_eval_detail(
         "judge_faithfulness": round(judge_verdict.faithfulness, 4),
         "judge_reasoning": judge_verdict.reasoning,
         "judge_fallback_used": judge_verdict.fallback_used,
+        # P2: per-sample judge cost — surfaces in the eval UI so ops can
+        # see which expensive paraphrase the judge spent budget on.
+        "judge_prompt_tokens": judge_verdict.prompt_tokens,
+        "judge_completion_tokens": judge_verdict.completion_tokens,
+        "judge_cost_usd": round(judge_verdict.cost_usd, 6),
         # P1: RAGAS-aligned context metrics, per-sample. Lets the UI
         # explain "retrieval found the right chunk but pulled 4 noise
         # chunks with it" (low precision) vs. "retrieval missed an
@@ -175,6 +180,12 @@ def run_eval(eval_dataset_id: str) -> EvalRun:
         # mean across samples becomes the dataset-level RAGAS metric.
         context_precision_sum = 0.0
         context_recall_sum = 0.0
+        # P2: judge token / cost aggregates. These only count tokens
+        # spent by the LLM judge — answer-generation token usage is
+        # tracked separately in chat history / request logs.
+        judge_prompt_tokens_total = 0
+        judge_completion_tokens_total = 0
+        judge_cost_usd_total = 0.0
         details: list[dict[str, object]] = []
 
         for sample in samples:
@@ -226,6 +237,9 @@ def run_eval(eval_dataset_id: str) -> EvalRun:
             faithfulness_sum += judge_verdict.faithfulness
             if judge_verdict.fallback_used:
                 judge_fallback_count += 1
+            judge_prompt_tokens_total += judge_verdict.prompt_tokens
+            judge_completion_tokens_total += judge_verdict.completion_tokens
+            judge_cost_usd_total += judge_verdict.cost_usd
 
             # P1: RAGAS-aligned context metrics computed on the same
             # retrieved chunks the LLM saw. Relevance signal is the
@@ -301,6 +315,14 @@ def run_eval(eval_dataset_id: str) -> EvalRun:
                 # needs.
                 "context_precision": mean_context_precision,
                 "context_recall": mean_context_recall,
+                # P2: judge-only token / cost totals. Lets ops decide
+                # "is the judge worth the extra USD?" alongside the
+                # judge_answer_correctness lift it produces. Per-sample
+                # judge_prompt_tokens / judge_completion_tokens / judge_cost_usd
+                # live in the per-detail row for drill-down.
+                "judge_prompt_tokens_total": judge_prompt_tokens_total,
+                "judge_completion_tokens_total": judge_completion_tokens_total,
+                "judge_cost_usd_total": round(judge_cost_usd_total, 6),
                 "quality_gate": quality_gate,
                 "quality_gate_reasons": quality_gate_reasons,
                 "provider_snapshot": {

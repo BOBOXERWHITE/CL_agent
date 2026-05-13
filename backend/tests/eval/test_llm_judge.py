@@ -306,3 +306,204 @@ def test_judge_verdict_is_immutable() -> None:
     )
     with pytest.raises((AttributeError, TypeError)):
         verdict.answer_correct = False  # type: ignore[misc]
+
+
+# ---------- P2: token usage + cost reporting -------------------------
+
+
+def _mock_transport_with_usage(
+    *,
+    content: dict[str, object],
+    prompt_tokens: int,
+    completion_tokens: int,
+) -> httpx.MockTransport:
+    """LLM gateway responses include an ``usage`` block per the OpenAI
+    contract. The judge needs to parse it so the runner can aggregate
+    cost per dataset run."""
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "choices": [{"message": {"content": json.dumps(content)}}],
+                "usage": {
+                    "prompt_tokens": prompt_tokens,
+                    "completion_tokens": completion_tokens,
+                    "total_tokens": prompt_tokens + completion_tokens,
+                },
+            },
+        )
+
+    return httpx.MockTransport(handler)
+
+
+def test_judge_records_token_usage_from_response(judge_settings, monkeypatch) -> None:
+    # Set a non-zero per-1K price so cost_usd should be > 0.
+    overridden = replace(
+        judge_settings,
+        eval_judge_price_prompt_per_1k_usd=1.0,  # $1 per 1K prompt tokens
+        eval_judge_price_completion_per_1k_usd=2.0,  # $2 per 1K completion tokens
+    )
+    monkeypatch.setattr("app.services.eval.llm_judge.get_settings", lambda: overridden)
+
+    transport = _mock_transport_with_usage(
+        content={
+            "answer_correct": True,
+            "faithfulness": 0.9,
+            "reasoning": "ok",
+        },
+        prompt_tokens=500,
+        completion_tokens=100,
+    )
+
+    verdict = judge_answer(
+        question="Q",
+        answer="A",
+        expected_keywords=[],
+        expected_citation="X",
+        citations=["X"],
+        keyword_fallback_match=True,
+        http_client=httpx.Client(transport=transport),
+    )
+
+    assert verdict.prompt_tokens == 500
+    assert verdict.completion_tokens == 100
+    # 500/1000 * $1 + 100/1000 * $2 = $0.5 + $0.2 = $0.7
+    assert verdict.cost_usd == pytest.approx(0.7, rel=1e-6)
+
+
+def test_judge_zero_cost_when_prices_default(judge_settings: Settings) -> None:
+    """Default judge_settings has both prices at 0 — cost_usd must be 0
+    even when tokens are non-zero, so users who don't configure prices
+    aren't shown a misleading $0.00 vs missing distinction."""
+    transport = _mock_transport_with_usage(
+        content={"answer_correct": True, "faithfulness": 0.5, "reasoning": "ok"},
+        prompt_tokens=200,
+        completion_tokens=50,
+    )
+
+    verdict = judge_answer(
+        question="Q",
+        answer="A",
+        expected_keywords=[],
+        expected_citation="X",
+        citations=["X"],
+        keyword_fallback_match=True,
+        http_client=httpx.Client(transport=transport),
+    )
+
+    assert verdict.prompt_tokens == 200
+    assert verdict.completion_tokens == 50
+    assert verdict.cost_usd == pytest.approx(0.0)
+
+
+def test_judge_token_fields_are_zero_when_disabled(monkeypatch) -> None:
+    """Fallback verdicts must report zero tokens — the LLM was never
+    called, so attributing any cost to this sample would be wrong."""
+    settings = get_settings()
+    overridden = replace(settings, eval_judge_enabled=False)
+    monkeypatch.setattr("app.services.eval.llm_judge.get_settings", lambda: overridden)
+
+    verdict = judge_answer(
+        question="Q",
+        answer="A",
+        expected_keywords=["A"],
+        expected_citation="X",
+        citations=["X"],
+        keyword_fallback_match=True,
+    )
+
+    assert verdict.fallback_used is True
+    assert verdict.prompt_tokens == 0
+    assert verdict.completion_tokens == 0
+    assert verdict.cost_usd == pytest.approx(0.0)
+
+
+def test_judge_handles_missing_usage_block_gracefully(judge_settings: Settings) -> None:
+    """Some OpenAI-compatible gateways (older self-hosted vLLM, etc.)
+    omit the ``usage`` block entirely. Judge should still parse the
+    verdict and report tokens=0 rather than raising."""
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {
+                        "message": {
+                            "content": json.dumps(
+                                {
+                                    "answer_correct": True,
+                                    "faithfulness": 0.8,
+                                    "reasoning": "no usage block in this gateway",
+                                }
+                            )
+                        }
+                    }
+                ],
+                # NO "usage" key
+            },
+        )
+
+    transport = httpx.MockTransport(handler)
+    verdict = judge_answer(
+        question="Q",
+        answer="A",
+        expected_keywords=[],
+        expected_citation="X",
+        citations=["X"],
+        keyword_fallback_match=True,
+        http_client=httpx.Client(transport=transport),
+    )
+
+    assert verdict.fallback_used is False  # parse succeeded
+    assert verdict.answer_correct is True
+    assert verdict.prompt_tokens == 0
+    assert verdict.completion_tokens == 0
+    assert verdict.cost_usd == pytest.approx(0.0)
+
+
+def test_judge_ignores_negative_or_garbage_token_counts(judge_settings: Settings) -> None:
+    """If the upstream returns nonsense token counts (negative, string,
+    null), the judge must coerce them to 0 rather than propagate the
+    garbage downstream into cost aggregation."""
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {
+                        "message": {
+                            "content": json.dumps(
+                                {
+                                    "answer_correct": True,
+                                    "faithfulness": 0.5,
+                                    "reasoning": "ok",
+                                }
+                            )
+                        }
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": -42,
+                    "completion_tokens": "wat",
+                    "total_tokens": None,
+                },
+            },
+        )
+
+    transport = httpx.MockTransport(handler)
+    verdict = judge_answer(
+        question="Q",
+        answer="A",
+        expected_keywords=[],
+        expected_citation="X",
+        citations=["X"],
+        keyword_fallback_match=True,
+        http_client=httpx.Client(transport=transport),
+    )
+
+    assert verdict.prompt_tokens == 0
+    assert verdict.completion_tokens == 0
+    assert verdict.cost_usd == pytest.approx(0.0)

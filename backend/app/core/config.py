@@ -183,6 +183,13 @@ class Settings:
     eval_judge_enabled: bool
     eval_judge_model_name: str
     eval_judge_timeout_seconds: float
+    # P2: judge token pricing in USD per 1K tokens. Zero by default
+    # (cost reporting opt-in) so anyone running on a free / metered-
+    # by-different-unit gateway doesn't see misleading $0.00 numbers.
+    # Look up your gateway's published rates and plug in here, e.g.
+    # DeepSeek v3.2: prompt $0.00027/1K, completion $0.00109/1K.
+    eval_judge_price_prompt_per_1k_usd: float
+    eval_judge_price_completion_per_1k_usd: float
 
 
 @lru_cache(maxsize=1)
@@ -290,4 +297,10 @@ def get_settings() -> Settings:
         eval_judge_enabled=_as_bool(os.getenv("EVAL_JUDGE_ENABLED"), default=False),
         eval_judge_model_name=os.getenv("EVAL_JUDGE_MODEL_NAME", "").strip(),
         eval_judge_timeout_seconds=float(os.getenv("EVAL_JUDGE_TIMEOUT_SECONDS", "20.0")),
+        eval_judge_price_prompt_per_1k_usd=float(
+            os.getenv("EVAL_JUDGE_PRICE_PROMPT_PER_1K_USD", "0.0")
+        ),
+        eval_judge_price_completion_per_1k_usd=float(
+            os.getenv("EVAL_JUDGE_PRICE_COMPLETION_PER_1K_USD", "0.0")
+        ),
     )

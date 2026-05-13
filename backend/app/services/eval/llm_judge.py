@@ -51,12 +51,25 @@ class JudgeVerdict:
     the verdict was synthesized from the keyword fallback. Aggregators
     should report the count separately so eval consumers know how much
     of the metric came from the LLM vs. a string match.
+
+    P2 token / cost reporting:
+      - ``prompt_tokens`` / ``completion_tokens``: from the OpenAI
+        ``usage`` block on the chat completion response. Zero when the
+        judge was disabled or when the upstream omitted the block (some
+        self-hosted gateways do).
+      - ``cost_usd``: computed from the price-per-1K config knobs. Zero
+        when prices are unconfigured — better than showing a misleading
+        $0.00 alongside non-zero tokens, ops people can spot the
+        unconfigured state at a glance.
     """
 
     answer_correct: bool
     faithfulness: float
     reasoning: str
     fallback_used: bool
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    cost_usd: float = 0.0
 
 
 def _keyword_fallback_verdict(
@@ -108,6 +121,38 @@ def _clamp_unit(value: object) -> float:
     if f > 1.0:
         return 1.0
     return f
+
+
+def _safe_nonnegative_int(value: object) -> int:
+    """Coerce a possibly-garbage upstream token count into a sane int.
+
+    OpenAI-compatible gateways sometimes return ``null``, a string, or a
+    negative number for ``usage.prompt_tokens`` (seen in older self-hosted
+    vLLM and in cached responses). We coerce to 0 rather than propagate
+    bad data into the cost aggregation downstream — easier to spot a
+    stuck-at-zero metric than chase phantom negative costs.
+    """
+    try:
+        n = int(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return 0
+    return max(n, 0)
+
+
+def _compute_cost_usd(
+    *,
+    prompt_tokens: int,
+    completion_tokens: int,
+    prompt_price_per_1k: float,
+    completion_price_per_1k: float,
+) -> float:
+    """Standard 1K-token pricing math. Returns 0.0 when either side is 0
+    so an unconfigured price never produces a phantom cost."""
+    if prompt_price_per_1k <= 0.0 and completion_price_per_1k <= 0.0:
+        return 0.0
+    prompt_cost = (prompt_tokens / 1000.0) * prompt_price_per_1k
+    completion_cost = (completion_tokens / 1000.0) * completion_price_per_1k
+    return round(prompt_cost + completion_cost, 6)
 
 
 def _parse_judge_payload(content: str) -> tuple[bool, float, str] | None:
@@ -236,11 +281,32 @@ def judge_answer(
     if not has_citations:
         # Ungrounded by definition — override the model's possibly-lenient score.
         faithfulness = 0.0
+
+    # P2: parse OpenAI ``usage`` block. Gracefully degrades to zeros
+    # when the gateway omitted the block (some self-hosted vLLM) or
+    # filled it with garbage (negative, null, string).
+    usage = payload.get("usage") if isinstance(payload, dict) else None
+    if isinstance(usage, dict):
+        prompt_tokens = _safe_nonnegative_int(usage.get("prompt_tokens"))
+        completion_tokens = _safe_nonnegative_int(usage.get("completion_tokens"))
+    else:
+        prompt_tokens = 0
+        completion_tokens = 0
+    cost_usd = _compute_cost_usd(
+        prompt_tokens=prompt_tokens,
+        completion_tokens=completion_tokens,
+        prompt_price_per_1k=settings.eval_judge_price_prompt_per_1k_usd,
+        completion_price_per_1k=settings.eval_judge_price_completion_per_1k_usd,
+    )
+
     return JudgeVerdict(
         answer_correct=answer_correct,
         faithfulness=faithfulness,
         reasoning=reasoning or "(judge returned empty reasoning)",
         fallback_used=False,
+        prompt_tokens=prompt_tokens,
+        completion_tokens=completion_tokens,
+        cost_usd=cost_usd,
     )
 
 

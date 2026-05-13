@@ -32,6 +32,12 @@ class EvalDetailPayload(BaseModel):
     # legacy rows persisted before P1 still validate cleanly.
     context_precision: float = 0.0
     context_recall: float = 0.0
+    # P2: per-sample judge token + cost. Same back-compat story: legacy
+    # rows persisted before P2 default to 0, so eval-history UI doesn't
+    # break when reading them back.
+    judge_prompt_tokens: int = 0
+    judge_completion_tokens: int = 0
+    judge_cost_usd: float = 0.0
 
 
 class EvalProviderSnapshotPayload(BaseModel):
@@ -69,6 +75,12 @@ class EvalMetricsPayload(BaseModel):
     # into the LLM's context window).
     context_precision: float = 0.0
     context_recall: float = 0.0
+    # P2: dataset-level judge token + cost totals. Useful for the
+    # ops question "is the LLM-as-judge worth the spend?" — pair with
+    # judge_answer_correctness to see correctness lift per USD.
+    judge_prompt_tokens_total: int = 0
+    judge_completion_tokens_total: int = 0
+    judge_cost_usd_total: float = 0.0
 
 
 class EvalRunPayload(BaseModel):
