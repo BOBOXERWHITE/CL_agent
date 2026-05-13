@@ -704,6 +704,22 @@ button {
   color: var(--accent-red);
 }
 
+/* Regression gate badges — reuse teal/amber/red tokens. */
+.status-pill--pass {
+  background: rgba(31, 108, 104, 0.12);
+  color: var(--accent-teal);
+}
+
+.status-pill--warn {
+  background: rgba(198, 118, 40, 0.12);
+  color: var(--accent-amber);
+}
+
+.status-pill--fail {
+  background: rgba(185, 80, 72, 0.12);
+  color: var(--accent-red);
+}
+
 .answer-card {
   margin-top: 24px;
   padding: 22px;
@@ -1087,6 +1103,87 @@ button {
   margin-top: 14px;
   padding-top: 14px;
   border-top: 1px solid rgba(17, 40, 59, 0.08);
+}
+
+/* P3 regression diff card */
+.eval-summary-card--regression {
+  margin-top: 16px;
+  border-color: rgba(31, 108, 104, 0.2);
+}
+
+.eval-regression-reasons {
+  margin: 14px 0 0;
+  padding-left: 22px;
+  color: var(--text-soft);
+  line-height: 1.7;
+}
+
+.eval-regression-table {
+  display: grid;
+  gap: 6px;
+  margin-top: 14px;
+}
+
+.eval-regression-table__head,
+.eval-regression-table__row {
+  display: grid;
+  grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr) minmax(0, 1fr) minmax(0, 1fr) minmax(0, 0.9fr);
+  gap: 10px;
+  padding: 8px 12px;
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.6);
+  border: 1px solid rgba(17, 40, 59, 0.06);
+  font-size: 0.92rem;
+}
+
+.eval-regression-table__head {
+  background: rgba(17, 40, 59, 0.04);
+  font-weight: 700;
+  color: var(--text-faint);
+}
+
+.eval-regression-table__row--regressed {
+  background: rgba(185, 80, 72, 0.08);
+  border-color: rgba(185, 80, 72, 0.24);
+  color: var(--accent-red);
+}
+
+/* P2 judge cost card — same skeleton as quality gate */
+.eval-summary-card--judge-cost {
+  margin-top: 16px;
+}
+
+/* Per-detail judge meta + context metrics rows */
+.eval-detail-card__judge {
+  margin-top: 14px;
+  padding: 12px 14px;
+  border-radius: 14px;
+  background: rgba(31, 108, 104, 0.06);
+  border: 1px solid rgba(31, 108, 104, 0.16);
+}
+
+.eval-detail-card__judge-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 14px;
+  margin-top: 6px;
+  color: var(--text-soft);
+  font-size: 0.92rem;
+}
+
+.eval-detail-card__judge-reasoning {
+  margin: 8px 0 0;
+  color: var(--text-soft);
+  line-height: 1.7;
+}
+
+.eval-detail-card__metrics {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 14px;
+  margin-top: 12px;
+  color: var(--text-faint);
+  font-size: 0.92rem;
 }
 
 .secondary-button--active {

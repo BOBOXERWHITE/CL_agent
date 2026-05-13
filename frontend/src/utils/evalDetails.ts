@@ -8,6 +8,10 @@ function escapeCsvCell(value: string): string {
   return `"${normalized}"`;
 }
 
+function formatFloatCell(value: number | undefined): string {
+  return value === undefined ? "" : value.toFixed(4);
+}
+
 export function filterEvalDetails(details: EvalDetail[], filter: EvalDetailFilter): EvalDetail[] {
   if (filter === "failed") {
     return details.filter((detail) => !detail.answer_correct || !detail.citation_hit);
@@ -28,6 +32,12 @@ export function buildEvalDetailsCsv(details: EvalDetail[], filterLabel: string):
     "答案正确",
     "引用命中",
     "低置信度",
+    // P0/P1/P2 additions — empty cells for legacy rows that don't carry these fields.
+    "LLM 判定正确",
+    "Faithfulness",
+    "Context Precision",
+    "Context Recall",
+    "裁判成本 (USD)",
     "实际引用",
     "筛选条件",
   ];
@@ -41,6 +51,11 @@ export function buildEvalDetailsCsv(details: EvalDetail[], filterLabel: string):
     detail.answer_correct ? "是" : "否",
     detail.citation_hit ? "是" : "否",
     detail.low_confidence ? "是" : "否",
+    detail.judge_answer_correct === undefined ? "" : detail.judge_answer_correct ? "是" : "否",
+    formatFloatCell(detail.judge_faithfulness),
+    formatFloatCell(detail.context_precision),
+    formatFloatCell(detail.context_recall),
+    detail.judge_cost_usd === undefined ? "" : detail.judge_cost_usd.toFixed(6),
     detail.citations.join(" / "),
     filterLabel,
   ]);
