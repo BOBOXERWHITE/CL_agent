@@ -94,6 +94,28 @@ class Settings:
     milvus_host: str
     milvus_port: int
     milvus_collection_name: str
+    # Milvus 2.5+ native BM25 (P6). When True, the Milvus collection
+    # schema gains a ``content`` VARCHAR field and a ``sparse_vector``
+    # SPARSE_FLOAT_VECTOR field bound by a ``BM25`` Function — Milvus
+    # tokenizes + computes BM25 weights server-side, removing the need
+    # for the SQL ``ILIKE`` lexical path. Off by default so existing
+    # collections / deployments are not silently mutated; the migration
+    # script ``backend/scripts/migrate_to_bm25.py`` does the schema
+    # upgrade + reingestion explicitly.
+    milvus_bm25_enabled: bool
+    # Tokenizer for the BM25 analyzer. ``jieba`` for Chinese corpora,
+    # ``standard`` for English / multi-lingual. Only consulted when
+    # ``milvus_bm25_enabled`` is True.
+    milvus_bm25_tokenizer: str
+    # Lexical retrieval backend toggle. ``ilike`` keeps the legacy
+    # PostgreSQL ``ILIKE`` + custom phrase-bonus scorer (current
+    # default). ``milvus_bm25`` routes lexical_hits through Milvus'
+    # native sparse BM25 search — requires ``milvus_bm25_enabled=True``
+    # and a collection that has been migrated. Keeping these as two
+    # separate flags lets us prepare the schema before flipping the
+    # query path, and roll back the query path without touching the
+    # schema.
+    lexical_backend: str
     embedding_provider: str
     embedding_model_name: str
     embedding_api_base_url: str
@@ -244,6 +266,9 @@ def get_settings() -> Settings:
         milvus_host=os.getenv("MILVUS_HOST", "localhost"),
         milvus_port=int(os.getenv("MILVUS_PORT", "19530")),
         milvus_collection_name=os.getenv("MILVUS_COLLECTION_NAME", "knowledge_chunks"),
+        milvus_bm25_enabled=_as_bool(os.getenv("MILVUS_BM25_ENABLED"), default=False),
+        milvus_bm25_tokenizer=os.getenv("MILVUS_BM25_TOKENIZER", "jieba").strip().lower(),
+        lexical_backend=os.getenv("LEXICAL_BACKEND", "ilike").strip().lower(),
         embedding_provider=os.getenv("EMBEDDING_PROVIDER", "deterministic").lower(),
         embedding_model_name=os.getenv("EMBEDDING_MODEL_NAME", "deterministic-hash-embedding"),
         embedding_api_base_url=os.getenv(

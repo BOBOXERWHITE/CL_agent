@@ -1,15 +1,26 @@
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 
 from sqlalchemy import or_, select
 
+from app.core.config import get_settings
 from app.db.models.knowledge import KnowledgeChunk, KnowledgeDocument
 from app.db.session import bypass_rls_session
 from app.services.rag.query_rewriter import rewrite_query as rewrite_query
 from app.services.rag.settings import get_rag_settings
 from app.services.rag.text_processing import build_search_terms, normalize_text
 from app.services.rag.vector_store import get_vector_store
+
+_log = logging.getLogger(__name__)
+
+# P6: Known values for ``settings.lexical_backend``. Unknown values fall
+# back to the legacy ILIKE path with a warning so a typo in env vars
+# cannot dark-launch BM25 against a non-migrated collection.
+_LEXICAL_BACKEND_ILIKE = "ilike"
+_LEXICAL_BACKEND_MILVUS_BM25 = "milvus_bm25"
+_KNOWN_LEXICAL_BACKENDS = frozenset({_LEXICAL_BACKEND_ILIKE, _LEXICAL_BACKEND_MILVUS_BM25})
 
 
 @dataclass(frozen=True)
@@ -246,6 +257,57 @@ def retrieve_lexical(
     return hits[: max(top_k * 2, top_k)]
 
 
+def retrieve_lexical_milvus(
+    question: str, tenant_id: str, customer_id: str, top_k: int
+) -> list[RetrievalHit]:
+    """P6: lexical retrieval via Milvus 2.5+ native BM25.
+
+    Mirrors :func:`retrieve_lexical`'s return shape so the hybrid
+    fusion + diversity layer downstream stays unchanged. The actual
+    BM25 scoring happens server-side in Milvus (inverted index +
+    Okapi formula); this function just (a) calls the vector store,
+    (b) loads chunk + document rows from PG by id, (c) wraps each
+    hit as a ``RetrievalHit`` with the BM25 score in ``lexical_score``.
+
+    Chunks that vanished from PG between Milvus insert and now (e.g.
+    document deleted but Milvus row not GC'd) are dropped silently
+    instead of crashing — matches ``retrieve_dense``'s behaviour.
+    """
+    rag_settings = get_rag_settings()
+    candidate_limit = max(top_k * rag_settings.lexical_candidate_multiplier, top_k)
+    bm25_hits = get_vector_store().search_bm25(
+        query_text=question,
+        tenant_id=tenant_id,
+        customer_id=customer_id,
+        top_k=candidate_limit,
+    )
+    if not bm25_hits:
+        return []
+
+    chunk_ids = [chunk_id for chunk_id, _ in bm25_hits]
+    chunk_map = {
+        chunk.id: (chunk, document)
+        for chunk, document in _load_chunks_by_ids(tenant_id, customer_id, chunk_ids)
+    }
+
+    hits: list[RetrievalHit] = []
+    for chunk_id, bm25_score in bm25_hits:
+        pair = chunk_map.get(chunk_id)
+        if pair is None:
+            continue
+        chunk, document = pair
+        hits.append(
+            RetrievalHit(
+                chunk=chunk,
+                document=document,
+                dense_score=0.0,
+                lexical_score=bm25_score,
+                combined_score=bm25_score,
+            )
+        )
+    return hits
+
+
 def retrieve_dense(
     question: str, tenant_id: str, customer_id: str, top_k: int
 ) -> list[RetrievalHit]:
@@ -289,8 +351,24 @@ def retrieve_hybrid(
     question: str, tenant_id: str, customer_id: str, top_k: int
 ) -> list[RetrievalHit]:
     rag_settings = get_rag_settings()
+    settings = get_settings()
+    # P6: pick lexical backend at call time so toggling LEXICAL_BACKEND
+    # at runtime (e.g. via the system settings panel in the future)
+    # takes effect without a process restart.
+    backend = settings.lexical_backend
+    if backend == _LEXICAL_BACKEND_MILVUS_BM25:
+        lexical_fn = retrieve_lexical_milvus
+    else:
+        if backend not in _KNOWN_LEXICAL_BACKENDS:
+            _log.warning(
+                "unknown lexical_backend=%r, falling back to %r",
+                backend,
+                _LEXICAL_BACKEND_ILIKE,
+            )
+        lexical_fn = retrieve_lexical
+
     dense_hits = retrieve_dense(question, tenant_id, customer_id, top_k)
-    lexical_hits = retrieve_lexical(question, tenant_id, customer_id, top_k)
+    lexical_hits = lexical_fn(question, tenant_id, customer_id, top_k)
     fused_hits = fuse_ranked_hits(
         dense_hits,
         lexical_hits,

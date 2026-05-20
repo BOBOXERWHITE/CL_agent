@@ -13,6 +13,12 @@ class VectorRecord:
     tenant_id: str
     customer_id: str
     embedding: list[float]
+    # P6: full chunk text, fed to the Milvus BM25 Function (which
+    # tokenizes + computes sparse BM25 weights server-side). Default
+    # "" keeps existing call sites that don't yet pass content alive —
+    # in that case the BM25 lexical path will simply not recall those
+    # rows, which is the expected behaviour pre-migration.
+    content: str = ""
 
 
 def build_vector_records(chunks: list[object]) -> list[VectorRecord]:
@@ -20,12 +26,13 @@ def build_vector_records(chunks: list[object]) -> list[VectorRecord]:
     if not chunks:
         return []
 
+    chunk_texts = [str(chunk.content) for chunk in chunks]
     embeddings = texts_to_embeddings(
-        [str(chunk.content) for chunk in chunks],
+        chunk_texts,
         rag_settings.embedding_dimension,
     )
     records: list[VectorRecord] = []
-    for chunk, embedding in zip(chunks, embeddings, strict=True):
+    for chunk, embedding, text in zip(chunks, embeddings, chunk_texts, strict=True):
         records.append(
             VectorRecord(
                 chunk_id=chunk.id,
@@ -33,6 +40,7 @@ def build_vector_records(chunks: list[object]) -> list[VectorRecord]:
                 tenant_id=chunk.tenant_id,
                 customer_id=chunk.customer_id,
                 embedding=embedding,
+                content=text,
             )
         )
 

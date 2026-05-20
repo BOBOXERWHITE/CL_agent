@@ -65,6 +65,12 @@ def test_ensure_collection_recreates_milvus_collection_when_embedding_dimension_
     store._field_cls = FakeField
     store._datatype = SimpleNamespace(VARCHAR="VARCHAR", FLOAT_VECTOR="FLOAT_VECTOR")
     store._embedding_dimension = 1024
+    # P6: BM25 fields are opt-in; this test pins the legacy dense-only
+    # schema shape, so leave the flag off.
+    store._bm25_enabled = False
+    store._bm25_tokenizer = "jieba"
+    store._function_cls = None
+    store._function_type = None
 
     collection = store._ensure_collection()
 

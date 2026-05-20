@@ -62,6 +62,12 @@ def _fresh_store(
     store._utility = _FakeUtility(has=has_collection)  # type: ignore[attr-defined]
     store._embedding_dimension = 16
     store._loaded = False
+    # P6: BM25 fields are off by default in this fixture so the legacy
+    # preload tests keep pinning the dense-only schema shape.
+    store._bm25_enabled = False
+    store._bm25_tokenizer = "jieba"
+    store._function_cls = None
+    store._function_type = None
     # Stash the fake so tests can assert on it.
     store.__test_collection__ = fake_collection  # type: ignore[attr-defined]
     return store
