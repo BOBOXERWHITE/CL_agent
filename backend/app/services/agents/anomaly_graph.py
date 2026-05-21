@@ -253,6 +253,14 @@ def _run_result_to_execution(
         detail=f"异常订单需人工在 {queue_name} 队列复核。",
     )
 
+    interrupt = {
+        "kind": "human_review",
+        "reason": "anomaly triage requires operator review",
+        "queue_name": queue_name,
+        "anomaly_code": output.get("code", "unknown"),
+        "allowed_decisions": ["approve", "edit", "reject"],
+    }
+
     return AgentExecutionResult(
         agent_name="order_anomaly_agent",
         route_name=route_name,
@@ -263,6 +271,14 @@ def _run_result_to_execution(
         timeline=timeline,
         tool_calls=[],
         engine_events=list(run_result.events),
+        interrupt=interrupt,
+        checkpoint_payload={
+            "output": dict(output),
+            "queue_name": queue_name,
+            "anomaly_code": output.get("code", "unknown"),
+            "review_interrupt": interrupt,
+        },
+        checkpoint_type="engine_adapter_state",
     )
 
 

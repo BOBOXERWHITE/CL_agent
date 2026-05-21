@@ -187,10 +187,16 @@ def test_llm_strategy_returns_none_on_garbage(monkeypatch: pytest.MonkeyPatch) -
     assert router_module.LLMRouteStrategy().classify("x") is None
 
 
-def test_llm_strategy_skips_deterministic_client() -> None:
+def test_llm_strategy_skips_deterministic_client(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Deterministic rewrite client (test default) → strategy returns None."""
     # Default test env has LLM_PROVIDER=deterministic, so get_rewrite_client
     # returns DeterministicRewriteClient. The strategy must refuse it.
+    monkeypatch.setenv("LLM_PROVIDER", "deterministic")
+    from app.core.config import get_settings
+
+    get_settings.cache_clear()
     assert LLMRouteStrategy().classify("酒店报销") is None
 
 
@@ -268,7 +274,7 @@ def test_invalid_provider_config_falls_back_to_keyword(
 
     get_settings.cache_clear()
     decision = choose_route(_req("酒店"))
-    assert decision.agent_name == "travel_policy_agent"
+    assert decision.agent_name == "policy_supervisor_agent"
 
 
 # ---------------------------------------------------------------------------

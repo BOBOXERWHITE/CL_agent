@@ -69,6 +69,10 @@ interface RebuildKnowledgeIndexInput {
   staleOnly?: boolean;
 }
 
+interface RechunkKnowledgeDocumentInput {
+  documentId?: string;
+}
+
 interface UploadKnowledgeDocumentInput {
   tenantId: string;
   customerId: string;
@@ -126,6 +130,18 @@ export async function rebuildKnowledgeIndex(
     body: JSON.stringify({
       document_id: input.documentId,
       stale_only: input.staleOnly ?? false,
+    }),
+  });
+}
+
+export async function rechunkKnowledgeDocuments(
+  input: RechunkKnowledgeDocumentInput,
+): Promise<KnowledgeRebuildResult> {
+  return requestJson<KnowledgeRebuildResult>("/api/knowledge/rechunk", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      document_id: input.documentId,
     }),
   });
 }

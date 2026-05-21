@@ -82,6 +82,7 @@ class DeterministicPolicyAnswerClient:
         evidence_snippets: list[str],
         confidence: float,
         prompt_template: str,
+        history_messages: list[dict[str, str]] | None = None,
     ) -> AnswerDraft:
         normalized_question = question.lower()
         primary_snippet = evidence_snippets[0]
@@ -135,17 +136,22 @@ class DeterministicPolicyAnswerClient:
         evidence_snippets: list[str],
         confidence: float,
         prompt_template: str,
+        history_messages: list[dict[str, str]] | None = None,
     ) -> AnswerDraft:
         """Deterministic twin of the async API; no IO, no awaits needed.
 
         Kept so the async query engine can treat every answer client
-        identically without a provider-type branch.
+        identically without a provider-type branch. ``history_messages``
+        is accepted for API parity but ignored — the deterministic
+        client doesn't use prior turns to influence its rule-based
+        responses.
         """
         return self.generate_answer(
             question=question,
             evidence_snippets=evidence_snippets,
             confidence=confidence,
             prompt_template=prompt_template,
+            history_messages=history_messages,
         )
 
     async def stream_answer_async(
@@ -155,6 +161,7 @@ class DeterministicPolicyAnswerClient:
         evidence_snippets: list[str],
         confidence: float,
         prompt_template: str,
+        history_messages: list[dict[str, str]] | None = None,
     ) -> AsyncIterator[StreamChunk]:
         """P6.5: deterministic streaming.
 
@@ -168,6 +175,7 @@ class DeterministicPolicyAnswerClient:
             evidence_snippets=evidence_snippets,
             confidence=confidence,
             prompt_template=prompt_template,
+            history_messages=history_messages,
         )
         # Split on whitespace into ~5 roughly equal pieces so the test
         # assertions on chunk count are stable.
@@ -216,8 +224,28 @@ class OpenAICompatiblePolicyAnswerClient:
         evidence_snippets: list[str],
         confidence: float,
         prompt_template: str,
+        history_messages: list[dict[str, str]] | None = None,
     ) -> AnswerDraft:
         evidence_block = "\n".join(f"- {snippet}" for snippet in evidence_snippets)
+        # Layout: [system, ...prior turns (user, assistant, ...), current user].
+        # Prior turns are inserted *after* the system instruction so the
+        # model never reinterprets them as instructions, and *before* the
+        # current question so they are read as context, not as the answer.
+        messages: list[dict[str, str]] = [
+            {"role": "system", "content": prompt_template},
+        ]
+        if history_messages:
+            messages.extend(history_messages)
+        messages.append(
+            {
+                "role": "user",
+                "content": (
+                    "请基于给定证据回答问题，回答要简洁且不能捏造未出现的信息。\n"
+                    f"问题：{question}\n"
+                    f"证据：\n{evidence_block}"
+                ),
+            }
+        )
         response = self._http_client.post(
             f"{self.base_url}/chat/completions",
             headers={
@@ -226,21 +254,8 @@ class OpenAICompatiblePolicyAnswerClient:
             },
             json={
                 "model": self.model_name,
-                "temperature": 0.1,
-                "messages": [
-                    {
-                        "role": "system",
-                        "content": prompt_template,
-                    },
-                    {
-                        "role": "user",
-                        "content": (
-                            "请基于给定证据回答问题，回答要简洁且不能捏造未出现的信息。\n"
-                            f"问题：{question}\n"
-                            f"证据：\n{evidence_block}"
-                        ),
-                    },
-                ],
+                "temperature": 0.0,
+                "messages": messages,
             },
         )
         response.raise_for_status()
@@ -265,6 +280,7 @@ class OpenAICompatiblePolicyAnswerClient:
         confidence: float,
         prompt_template: str,
         async_client: httpx.AsyncClient | None = None,
+        history_messages: list[dict[str, str]] | None = None,
     ) -> AsyncIterator[StreamChunk]:
         """P6.5: OpenAI-compatible chat-completions SSE consumer.
 
@@ -276,6 +292,11 @@ class OpenAICompatiblePolicyAnswerClient:
 
         The terminal ``data: [DONE]`` line has no JSON body — we only
         use it to exit the loop cleanly.
+
+        ``history_messages`` (P11) is the flat ``[user, assistant, ...]``
+        list of prior turns inserted between system and the current user
+        question. Mirrors :meth:`generate_answer`'s layout so streaming
+        and non-streaming responses share the same prompt geometry.
         """
         client = async_client
         if client is None:
@@ -284,21 +305,26 @@ class OpenAICompatiblePolicyAnswerClient:
             client = get_async_http_client()
 
         evidence_block = "\n".join(f"- {snippet}" for snippet in evidence_snippets)
+        messages: list[dict[str, str]] = [
+            {"role": "system", "content": prompt_template},
+        ]
+        if history_messages:
+            messages.extend(history_messages)
+        messages.append(
+            {
+                "role": "user",
+                "content": (
+                    "请基于给定证据回答问题，回答要简洁且不能捏造未出现的信息。\n"
+                    f"问题：{question}\n"
+                    f"证据：\n{evidence_block}"
+                ),
+            }
+        )
         req_body = {
             "model": self.model_name,
-            "temperature": 0.1,
+            "temperature": 0.0,
             "stream": True,
-            "messages": [
-                {"role": "system", "content": prompt_template},
-                {
-                    "role": "user",
-                    "content": (
-                        "请基于给定证据回答问题，回答要简洁且不能捏造未出现的信息。\n"
-                        f"问题：{question}\n"
-                        f"证据：\n{evidence_block}"
-                    ),
-                },
-            ],
+            "messages": messages,
         }
 
         total_content: list[str] = []
@@ -356,12 +382,16 @@ class OpenAICompatiblePolicyAnswerClient:
         confidence: float,
         prompt_template: str,
         async_client: httpx.AsyncClient | None = None,
+        history_messages: list[dict[str, str]] | None = None,
     ) -> AnswerDraft:
         """Async twin of :meth:`generate_answer` (P4.2).
 
         Same request body + same response parsing. Pulls the shared
         ``AsyncClient`` from P4.1's factory when the caller doesn't inject
         one (tests inject a ``MockTransport``-backed client).
+
+        ``history_messages`` (P11) carries the flattened prior turns; see
+        :meth:`generate_answer` for the layout invariant.
         """
         client = async_client
         if client is None:
@@ -370,6 +400,21 @@ class OpenAICompatiblePolicyAnswerClient:
             client = get_async_http_client()
 
         evidence_block = "\n".join(f"- {snippet}" for snippet in evidence_snippets)
+        messages: list[dict[str, str]] = [
+            {"role": "system", "content": prompt_template},
+        ]
+        if history_messages:
+            messages.extend(history_messages)
+        messages.append(
+            {
+                "role": "user",
+                "content": (
+                    "请基于给定证据回答问题，回答要简洁且不能捏造未出现的信息。\n"
+                    f"问题：{question}\n"
+                    f"证据：\n{evidence_block}"
+                ),
+            }
+        )
         response = await client.post(
             f"{self.base_url}/chat/completions",
             headers={
@@ -378,18 +423,8 @@ class OpenAICompatiblePolicyAnswerClient:
             },
             json={
                 "model": self.model_name,
-                "temperature": 0.1,
-                "messages": [
-                    {"role": "system", "content": prompt_template},
-                    {
-                        "role": "user",
-                        "content": (
-                            "请基于给定证据回答问题，回答要简洁且不能捏造未出现的信息。\n"
-                            f"问题：{question}\n"
-                            f"证据：\n{evidence_block}"
-                        ),
-                    },
-                ],
+                "temperature": 0.0,
+                "messages": messages,
             },
         )
         response.raise_for_status()

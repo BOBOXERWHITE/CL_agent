@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from time import perf_counter
 from uuid import uuid4
 
@@ -25,6 +26,7 @@ from app.schemas.chat import (
     LlmSmokeTestPayload,
     RetrievalTracePayload,
 )
+from app.services.chat_history import load_recent_turns, turns_to_messages
 from app.services.llm.client import check_llm_readiness, run_llm_smoke_test
 from app.services.rag.query_engine import (
     PolicyAnswerResult,
@@ -37,6 +39,20 @@ from app.services.rag.query_engine import (
 from app.services.system_settings import get_effective_business_settings
 
 router = APIRouter(prefix="/api/chat", tags=["chat"])
+
+_RAG_RECALL_LOG_RETRIEVAL_MODE_MAX_LEN = 32
+_RETRIEVAL_TIMING_SUFFIX_RE = re.compile(r":\d+ms/\d+ms$")
+
+
+def _storage_safe_retrieval_mode(mode: str) -> str:
+    """Normalize the trace mode for ``rag_recall_log.retrieval_mode``.
+
+    The API trace keeps the full timing suffix for UI/debug use, but the
+    DB column is only 32 chars wide. Persist a stable mode label so long
+    generations do not 500 the request during ``session.commit()``.
+    """
+    normalized = _RETRIEVAL_TIMING_SUFFIX_RE.sub("", mode or "")
+    return normalized[:_RAG_RECALL_LOG_RETRIEVAL_MODE_MAX_LEN]
 
 
 @router.get("/llm-readiness", response_model=LlmReadinessPayload)
@@ -106,24 +122,34 @@ async def ask_policy_question(
     customer_id = payload.customer_id or business_settings.default_customer_id
     request.state.tenant_id = tenant_id
     request.state.customer_id = customer_id
+
+    # P11: resolve thread_id up front so we can load history before the
+    # LLM call. New threads short-circuit to "" inside the loader (no
+    # rows yet), so this is safe whether the client supplied an id or not.
+    thread_id = payload.thread_id or payload.session_id or str(uuid4())
+    request.state.session_id = thread_id
+    history_turns = load_recent_turns(
+        session,
+        session_id=payload.thread_id or payload.session_id,
+        max_turns=business_settings.chat_history_max_turns,
+    )
+
     started_at = perf_counter()
     result = await answer_policy_question_async(
         question=payload.question,
         tenant_id=tenant_id,
         customer_id=customer_id,
+        chat_history_messages=turns_to_messages(history_turns) or None,
     )
     latency_ms = int((perf_counter() - started_at) * 1000)
     request.state.model_name = result.retrieval_trace.model_name
     request.state.token_usage = result.retrieval_trace.token_usage
     # P5.2: let the token aggregate sink attribute to the chat flow.
     request.state.agent_name = "chat"
-
-    session_id = payload.session_id or str(uuid4())
-    request.state.session_id = session_id
-    chat_session = session.get(ChatSession, session_id)
+    chat_session = session.get(ChatSession, thread_id)
     if chat_session is None:
         chat_session = ChatSession(
-            id=session_id,
+            id=thread_id,
             tenant_id=tenant_id,
             customer_id=customer_id,
         )
@@ -132,7 +158,7 @@ async def ask_policy_question(
     session.add(
         ChatMessage(
             id=str(uuid4()),
-            session_id=session_id,
+            session_id=thread_id,
             role="user",
             content=payload.question,
             metadata_json={},
@@ -141,7 +167,7 @@ async def ask_policy_question(
     session.add(
         ChatMessage(
             id=str(uuid4()),
-            session_id=session_id,
+            session_id=thread_id,
             role="assistant",
             content=result.answer,
             metadata_json={
@@ -155,11 +181,11 @@ async def ask_policy_question(
         RagRecallLog(
             id=str(uuid4()),
             request_id=context.request_id,
-            session_id=session_id,
+            session_id=thread_id,
             tenant_id=tenant_id,
             customer_id=customer_id,
             question=payload.question,
-            retrieval_mode=result.retrieval_trace.mode,
+            retrieval_mode=_storage_safe_retrieval_mode(result.retrieval_trace.mode),
             prompt_template_id=result.prompt_template_id,
             prompt_name=result.retrieval_trace.prompt_name,
             prompt_version=result.retrieval_trace.prompt_version,
@@ -179,18 +205,19 @@ async def ask_policy_question(
         ctx=context,
         action="chat.ask",
         target_type="ChatSession",
-        target_id=session_id,
+        target_id=thread_id,
         payload={
             "question_chars": len(payload.question),
             "confidence": result.confidence,
             "citation_count": len(result.citations),
-            "session_reused": payload.session_id is not None,
+            "session_reused": payload.session_id is not None or payload.thread_id is not None,
         },
     )
     session.commit()
 
     return ChatAskResponse(
-        session_id=session_id,
+        thread_id=thread_id,
+        session_id=thread_id,
         answer=result.answer,
         confidence=result.confidence,
         citations=[
@@ -263,6 +290,17 @@ async def stream_policy_question(
     # A future iteration can push the real OpenAI ``stream=true`` call
     # down through the engine; the ``stream_answer_async`` infra is
     # already in place for that. Phase 6 keeps the deterministic path.
+    # P11: resolve thread + load history before the prep phase so the
+    # StreamReadyContext carries the prior turns through to the LLM call.
+    thread_id = payload.thread_id or payload.session_id or str(uuid4())
+    request.state.session_id = thread_id
+    request.state.agent_name = "chat"
+    history_turns = load_recent_turns(
+        session,
+        session_id=payload.thread_id or payload.session_id,
+        max_turns=business_settings.chat_history_max_turns,
+    )
+
     stream_started_at = perf_counter()
     # P7.1: prepare phase only — no LLM call yet. Returns either an
     # early-exit PolicyAnswerResult (no-evidence / low-confidence /
@@ -271,16 +309,13 @@ async def stream_policy_question(
         question=payload.question,
         tenant_id=tenant_id,
         customer_id=customer_id,
+        chat_history_messages=turns_to_messages(history_turns) or None,
     )
-
-    session_id = payload.session_id or str(uuid4())
-    request.state.session_id = session_id
-    request.state.agent_name = "chat"
 
     async def _event_generator():
         nonlocal prepared
         # Head-of-stream metadata.
-        yield _sse_event({"event": "start", "session_id": session_id})
+        yield _sse_event({"event": "start", "session_id": thread_id, "thread_id": thread_id})
 
         if isinstance(prepared, PolicyAnswerResult):
             # Early-exit path: no LLM streaming, answer is already
@@ -303,7 +338,7 @@ async def stream_policy_question(
                 context=context,
                 tenant_id=tenant_id,
                 customer_id=customer_id,
-                session_id=session_id,
+                session_id=thread_id,
                 latency_ms=int((perf_counter() - stream_started_at) * 1000),
             )
             yield _sse_event(
@@ -311,7 +346,8 @@ async def stream_policy_question(
                     "event": "done",
                     "token_usage": result.retrieval_trace.token_usage,
                     "model": result.retrieval_trace.model_name,
-                    "session_id": session_id,
+                    "session_id": thread_id,
+                    "thread_id": thread_id,
                 }
             )
             return
@@ -365,7 +401,7 @@ async def stream_policy_question(
                 context=context,
                 tenant_id=tenant_id,
                 customer_id=customer_id,
-                session_id=session_id,
+                session_id=thread_id,
                 latency_ms=int((perf_counter() - stream_started_at) * 1000),
             )
         except Exception as exc:
@@ -377,7 +413,8 @@ async def stream_policy_question(
                 "event": "done",
                 "token_usage": result.retrieval_trace.token_usage,
                 "model": result.retrieval_trace.model_name,
-                "session_id": session_id,
+                "session_id": thread_id,
+                "thread_id": thread_id,
             }
         )
 
@@ -453,7 +490,7 @@ async def _persist_chat(
             tenant_id=tenant_id,
             customer_id=customer_id,
             question=payload.question,
-            retrieval_mode=result.retrieval_trace.mode,
+            retrieval_mode=_storage_safe_retrieval_mode(result.retrieval_trace.mode),
             prompt_template_id=result.prompt_template_id,
             prompt_name=result.retrieval_trace.prompt_name,
             prompt_version=result.retrieval_trace.prompt_version,
@@ -476,7 +513,7 @@ async def _persist_chat(
             "question_chars": len(payload.question),
             "confidence": result.confidence,
             "citation_count": len(result.citations),
-            "session_reused": payload.session_id is not None,
+            "session_reused": payload.session_id is not None or payload.thread_id is not None,
         },
     )
     request.state.session_id = session_id

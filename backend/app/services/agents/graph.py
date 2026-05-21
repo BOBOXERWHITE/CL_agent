@@ -3,6 +3,7 @@ from __future__ import annotations
 from app.services.agents.anomaly_graph import execute_anomaly_graph
 from app.services.agents.nodes import append_timeline_step
 from app.services.agents.policy_graph import execute_policy_graph
+from app.services.agents.policy_supervisor import execute_policy_supervisor
 from app.services.agents.router import AgentRouteRequest, choose_route
 from app.services.agents.state import AgentExecutionResult, TimelineStep
 from app.services.agents.ticket_router_graph import execute_ticket_router_graph
@@ -29,6 +30,18 @@ def run_agent_workflow(request: AgentRouteRequest) -> AgentExecutionResult:
     if route.agent_name == "order_anomaly_agent":
         return execute_anomaly_graph(
             question=request.question,
+            route_name=route.route_name,
+            base_timeline=timeline,
+        )
+
+    if route.agent_name == "policy_supervisor_agent":
+        return execute_policy_supervisor(
+            question=request.question,
+            tenant_id=request.tenant_id,
+            customer_id=request.customer_id,
+            thread_id=request.thread_id or request.run_id or "",
+            run_id=request.run_id or "",
+            user_id=request.user_id or request.customer_id,
             route_name=route.route_name,
             base_timeline=timeline,
         )

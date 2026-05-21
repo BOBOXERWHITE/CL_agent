@@ -21,7 +21,7 @@ from uuid import uuid4
 
 from fastapi.testclient import TestClient
 
-from app.db.models.agent import AgentRun
+from app.db.models.agent import AgentRun, AgentThread
 from app.db.models.agent_event import AgentEvent
 from app.db.models.rule import ReviewCase
 from app.db.session import SessionLocal
@@ -37,11 +37,22 @@ def _seed_awaiting_run(
     run_id = str(uuid4())
     case_id = str(uuid4())
     with SessionLocal() as session:
+        session.add(
+            AgentThread(
+                id=run_id,
+                tenant_id=tenant_id,
+                customer_id=customer_id,
+                domain="policy",
+                specialist="policy_supervisor_agent",
+                status="awaiting_review",
+            )
+        )
         run = AgentRun(
             id=run_id,
+            thread_id=run_id,
             tenant_id=tenant_id,
             customer_id=customer_id,
-            agent_name="travel_policy_agent",
+            agent_name="policy_supervisor_agent",
             route_name="policy_qa",
             status=run_status,
             confidence=0.42,
@@ -79,6 +90,12 @@ def test_resume_approve_marks_completed_and_resolves_case(client: TestClient) ->
     assert body["status"] == "completed"
     assert body["requires_human_review"] is False
     assert body["output"]["resolution"]["decision"] == "approve"
+    assert any(
+        event["category"] == "review"
+        and event["name"] == "resume"
+        and event["status"] == "completed"
+        for event in body["output"]["orchestration_trace"]["trace_events"]
+    )
     assert body["output"]["resolution"]["note"] == "合规，批准通过。"
 
     with SessionLocal() as session:
@@ -112,6 +129,32 @@ def test_resume_reject_marks_rejected(client: TestClient) -> None:
         assert case.status == "rejected"
 
 
+def test_resume_edit_updates_answer_and_marks_resolved(client: TestClient) -> None:
+    run_id, case_id = _seed_awaiting_run()
+
+    response = client.post(
+        f"/api/agents/runs/{run_id}/resume",
+        json={"decision": "edit", "edited_answer": "人工修订后的答案", "note": "补充人工结论"},
+    )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["status"] == "completed"
+    assert body["output"]["answer"] == "人工修订后的答案"
+    assert body["output"]["resolution"]["decision"] == "edit"
+    assert any(
+        event["category"] == "review"
+        and event["name"] == "resume"
+        and event["status"] == "completed"
+        and event["metadata"]["decision"] == "edit"
+        for event in body["output"]["orchestration_trace"]["trace_events"]
+    )
+
+    with SessionLocal() as session:
+        case = session.get(ReviewCase, case_id)
+        assert case is not None
+        assert case.status == "resolved"
+
+
 def test_resume_unknown_run_returns_404(client: TestClient) -> None:
     response = client.post(
         "/api/agents/runs/does-not-exist/resume",
@@ -137,6 +180,15 @@ def test_resume_validates_decision_enum(client: TestClient) -> None:
         json={"decision": "maybe"},
     )
     # Pydantic pattern validation → 422.
+    assert response.status_code == 422
+
+
+def test_resume_edit_requires_edited_answer(client: TestClient) -> None:
+    run_id, _ = _seed_awaiting_run()
+    response = client.post(
+        f"/api/agents/runs/{run_id}/resume",
+        json={"decision": "edit", "note": "missing answer"},
+    )
     assert response.status_code == 422
 
 

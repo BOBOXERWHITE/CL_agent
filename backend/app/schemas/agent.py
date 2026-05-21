@@ -18,6 +18,7 @@ class AgentRunCreateRequest(BaseModel):
     question: str = Field(min_length=1)
     tenant_id: str = "default-tenant"
     customer_id: str = "default-customer"
+    thread_id: str | None = None
     ticket: TicketPayload | None = None
 
 
@@ -36,14 +37,25 @@ class ToolCallPayload(BaseModel):
     output_payload: dict[str, Any]
 
 
+class AgentCheckpointPayload(BaseModel):
+    id: str
+    checkpoint_type: str
+    status: str
+    created_at: datetime
+
+
 class AgentRunPayload(BaseModel):
     id: str
+    thread_id: str
     agent_name: str
     route_name: str
     status: str
     confidence: float
     requires_human_review: bool
     output: dict[str, Any]
+    thread_status: str | None = None
+    pending_interrupt: dict[str, Any] = Field(default_factory=dict)
+    latest_checkpoint: AgentCheckpointPayload | None = None
     timeline: list[TimelineStepPayload]
     tool_calls: list[ToolCallPayload]
     created_at: datetime
@@ -62,5 +74,6 @@ class AgentRunResumeRequest(BaseModel):
     ReviewCase resolution.
     """
 
-    decision: str = Field(pattern="^(approve|reject)$")
+    decision: str = Field(pattern="^(approve|edit|reject)$")
     note: str = Field(default="", max_length=2000)
+    edited_answer: str | None = Field(default=None, max_length=8000)

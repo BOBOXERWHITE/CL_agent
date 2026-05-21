@@ -361,6 +361,103 @@ def rebuild_knowledge_index(
         )
 
 
+def rechunk_knowledge_document(
+    document_id: str | None = None,
+) -> KnowledgeRebuildSnapshot:
+    """Re-parse + re-chunk + re-embed completed documents.
+
+    Unlike :func:`rebuild_knowledge_index`, which keeps the existing chunk
+    boundaries and only refreshes their embeddings, this re-runs the full
+    ``parse → chunk`` pipeline against the original file in object
+    storage. Use it after the chunker logic itself changes (e.g. table-
+    aware chunking) so existing documents pick up the new boundaries
+    without a manual delete + re-upload cycle.
+
+    The ``document_id`` row stays stable; only its ``KnowledgeChunk``
+    children and the corresponding vector-store rows are replaced. Any
+    historical references to old chunk_ids (e.g. RagRecallLog.trace_json
+    snapshots) are intentionally left dangling — they are an audit
+    record of *what was retrieved at the time*, not a live FK target.
+    """
+    init_db()
+    object_storage = get_object_storage()
+    vector_store = get_vector_store()
+    embedding_profile = get_active_embedding_profile()
+
+    with bypass_rls_session() as session:
+        query = (
+            select(KnowledgeDocument)
+            .options(selectinload(KnowledgeDocument.chunks))
+            .where(KnowledgeDocument.status == "completed")
+            .order_by(KnowledgeDocument.created_at.desc())
+        )
+        if document_id:
+            query = query.where(KnowledgeDocument.id == document_id)
+
+        documents = session.scalars(query).unique().all()
+        if not documents:
+            if document_id:
+                raise ValueError(f"document {document_id} not found")
+            raise ValueError("no completed documents available for rechunk")
+
+        total_chunks = 0
+        for document in documents:
+            file_bytes = object_storage.read(document.storage_key)
+            parsed_document = parse_document(file_bytes, document.filename, document.content_type)
+            chunk_payloads = chunk_document(parsed_document)
+
+            old_chunk_ids = [chunk.id for chunk in document.chunks]
+            if old_chunk_ids:
+                # Drop vectors first so there's no window where the vector
+                # store still points to deleted chunk rows.
+                vector_store.delete(old_chunk_ids)
+                for chunk in list(document.chunks):
+                    session.delete(chunk)
+                session.flush()
+
+            new_chunks: list[KnowledgeChunk] = []
+            for payload in chunk_payloads:
+                chunk = KnowledgeChunk(
+                    id=str(uuid4()),
+                    document_id=document.id,
+                    tenant_id=document.tenant_id,
+                    customer_id=document.customer_id,
+                    chunk_index=payload.chunk_index,
+                    title=payload.title,
+                    content=payload.content,
+                    attributes_json=payload.attributes,
+                )
+                session.add(chunk)
+                new_chunks.append(chunk)
+            session.flush()
+
+            vector_records = build_vector_records(new_chunks)
+            vector_ids = vector_store.upsert(vector_records)
+            for chunk in new_chunks:
+                chunk.vector_id = vector_ids.get(chunk.id)
+                chunk.attributes_json = {
+                    **(chunk.attributes_json or {}),
+                    "embedding_profile": _profile_to_json(embedding_profile),
+                }
+
+            document.parser_name = parsed_document.parser_name
+            document.chunk_count = len(new_chunks)
+            document.attributes_json = {
+                **(document.attributes_json or {}),
+                "embedding_profile": _profile_to_json(embedding_profile),
+            }
+            total_chunks += len(new_chunks)
+
+        session.commit()
+
+        return KnowledgeRebuildSnapshot(
+            scope="document" if document_id else "all",
+            document_count=len(documents),
+            chunk_count=total_chunks,
+            document_ids=[document.id for document in documents],
+        )
+
+
 def delete_knowledge_document(document_id: str) -> KnowledgeDeleteSnapshot:
     init_db()
     object_storage = get_object_storage()

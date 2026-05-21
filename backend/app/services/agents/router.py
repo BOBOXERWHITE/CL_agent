@@ -48,6 +48,9 @@ class AgentRouteRequest:
     question: str
     tenant_id: str
     customer_id: str
+    run_id: str | None = None
+    thread_id: str | None = None
+    user_id: str | None = None
     ticket: dict[str, Any] | None = None
 
 
@@ -57,6 +60,10 @@ class AgentRouteDecision:
     route_name: str
     reason: str
     requires_human_review: bool
+    domain: str = "generic"
+    specialist: str = ""
+    confidence: float = 1.0
+    fallback_reason: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -102,7 +109,7 @@ INTENT_CATALOG: tuple[IntentSpec, ...] = (
     ),
     IntentSpec(
         intent="POLICY_QA",
-        agent_name="travel_policy_agent",
+        agent_name="policy_supervisor_agent",
         route_name="policy_qa",
         reason="检测到政策问答语义，转入政策问答 Agent。",
         requires_human_review=False,
@@ -329,11 +336,19 @@ def _build_chain(primary: str) -> list[RouteStrategy]:
 
 
 def _decision_from_spec(spec: IntentSpec, *, via: str) -> AgentRouteDecision:
+    domain = "policy"
+    if spec.intent == "TICKET_TRIAGE":
+        domain = "ticket"
+    elif spec.intent == "ORDER_ANOMALY":
+        domain = "anomaly"
     return AgentRouteDecision(
         agent_name=spec.agent_name,
         route_name=spec.route_name,
         reason=f"{spec.reason}（路由策略：{via}）",
         requires_human_review=spec.requires_human_review,
+        domain=domain,
+        specialist=spec.agent_name,
+        confidence=1.0,
     )
 
 
@@ -353,8 +368,23 @@ def choose_route(request: AgentRouteRequest) -> AgentRouteDecision:
         return _decision_from_spec(spec, via="ticket-payload")
 
     # 2 + 3. Run the strategy chain.
-    settings = get_settings()
-    chain = _build_chain(settings.agent_router_provider)
+    # Resolve the primary strategy from DB-backed business settings so the
+    # operator can switch llm/embedding/keyword from the System Settings
+    # page without redeploying. Fall back to the env-bound value if the
+    # business-settings layer is unavailable for any reason (e.g. the DB
+    # was just initialised in a unit test).
+    primary_provider: str
+    try:
+        from app.services.system_settings import get_effective_business_settings
+
+        primary_provider = get_effective_business_settings().agent_router_provider
+    except Exception as exc:
+        _log.warning(
+            "router_effective_settings_unavailable",
+            extra={"error": str(exc)},
+        )
+        primary_provider = get_settings().agent_router_provider
+    chain = _build_chain(primary_provider)
     for strategy in chain:
         try:
             matched = strategy.classify(request.question)

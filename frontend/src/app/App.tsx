@@ -29,6 +29,8 @@ const DEFAULT_BUSINESS_SETTINGS: EditableSystemSettings = {
   chat_top_k: 3,
   chat_confidence_threshold: 0.2,
   default_eval_dataset: "zh-policy-smoke",
+  agent_router_provider: "keyword",
+  chat_history_max_turns: 5,
 };
 
 const TAB_CONFIG: {

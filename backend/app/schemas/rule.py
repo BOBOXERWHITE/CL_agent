@@ -5,6 +5,8 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
+from app.schemas.agent import AgentCheckpointPayload
+
 
 class PolicyRulePayload(BaseModel):
     id: str
@@ -59,12 +61,17 @@ class ReviewCasePayload(BaseModel):
     source: str
     tenant_id: str
     customer_id: str
+    agent_run_id: str | None = None
+    thread_id: str | None = None
     status: str
     confidence: float
     reason: str
     suggested_action: str
     payload: dict[str, Any]
     rule_result: dict[str, Any]
+    pending_interrupt: dict[str, Any] = Field(default_factory=dict)
+    latest_checkpoint: AgentCheckpointPayload | None = None
+    trace_events: list[dict[str, Any]] = Field(default_factory=list)
     created_at: datetime
     updated_at: datetime
 

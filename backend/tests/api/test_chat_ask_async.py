@@ -86,3 +86,65 @@ async def test_chat_ask_concurrent_requests_complete(asgi_app, seeded_policy_chu
     # The second-onwards requests hit the answer cache so they're near-free
     # — we just want to confirm the event loop isn't serialised.
     assert parallel_elapsed < max(serial_elapsed * 2.5, 1.0)
+
+
+async def test_chat_ask_persists_storage_safe_retrieval_mode(
+    asgi_app, monkeypatch, seeded_policy_chunks: None
+) -> None:
+    """Long response trace modes must be normalized before DB persistence."""
+    from app.api.routes import chat as chat_route
+    from app.db.models.rag_recall_log import RagRecallLog
+    from app.db.session import SessionLocal
+    from app.services.rag.query_engine import PolicyAnswerResult, RetrievalTrace
+
+    long_mode = "multi_hybrid+crag:14571ms/30349ms"
+
+    async def _fake_answer(
+        *,
+        question: str,
+        tenant_id: str,
+        customer_id: str,
+        chat_history_messages: list[dict[str, str]] | None = None,
+    ) -> PolicyAnswerResult:
+        return PolicyAnswerResult(
+            answer=f"answer for {question}",
+            confidence=0.91,
+            citations=[],
+            retrieval_trace=RetrievalTrace(
+                mode=long_mode,
+                prompt_name="test-prompt",
+                prompt_version=1,
+                model_name="test-model",
+                token_usage={"input_tokens": 12, "output_tokens": 34},
+                selected_chunks=[],
+                original_query=question,
+                expanded_query=question,
+                rewrite_rules=[],
+                candidate_count=0,
+            ),
+            prompt_template_id=None,
+        )
+
+    monkeypatch.setattr(chat_route, "answer_policy_question_async", _fake_answer)
+
+    transport = httpx.ASGITransport(app=asgi_app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+        resp = await client.post(
+            "/api/chat/ask",
+            headers={"Authorization": "Bearer admin-token"},
+            json={
+                "question": "test question",
+                "tenant_id": "t1",
+                "customer_id": "c1",
+            },
+        )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["retrieval_trace"]["mode"] == long_mode
+
+    with SessionLocal() as session:
+        recall = (
+            session.query(RagRecallLog).filter(RagRecallLog.session_id == body["session_id"]).one()
+        )
+        assert recall.retrieval_mode == "multi_hybrid+crag"
+        assert len(recall.retrieval_mode) <= 32

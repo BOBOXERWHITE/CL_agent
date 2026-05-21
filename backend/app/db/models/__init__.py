@@ -1,4 +1,4 @@
-from app.db.models.agent import AgentRun, ToolCallLog
+from app.db.models.agent import AgentRun, AgentThread, AgentThreadCheckpoint, ToolCallLog
 from app.db.models.agent_event import AgentEvent
 from app.db.models.agent_memory import AgentMemoryEntry
 from app.db.models.audit_log import AuditLog
@@ -19,6 +19,8 @@ __all__ = [
     "AgentEvent",
     "AgentMemoryEntry",
     "AgentRun",
+    "AgentThread",
+    "AgentThreadCheckpoint",
     "AuditLog",
     "ChatMessage",
     "ChatSession",

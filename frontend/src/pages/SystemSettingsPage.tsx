@@ -10,9 +10,32 @@ import {
 import {
   getSystemSettings,
   updateSystemSettings,
+  type AgentRouterProvider,
   type EditableSystemSettings,
   type RuntimeSystemSettings,
 } from "../api/settings";
+
+const AGENT_ROUTER_PROVIDERS: ReadonlyArray<{
+  value: AgentRouterProvider;
+  label: string;
+  hint: string;
+}> = [
+  {
+    value: "keyword",
+    label: "keyword（兜底，0 成本）",
+    hint: "纯字符串匹配。无 LLM/embedding 调用，最快最省，但同义词与新词不鲁棒。",
+  },
+  {
+    value: "embedding",
+    label: "embedding（cos sim，毫秒级）",
+    hint: "用 embedding 计算问题与 intent exemplar 的相似度。无 token 成本，精度中等。",
+  },
+  {
+    value: "llm",
+    label: "llm（最高精度，每次多一次 LLM 调用）",
+    hint: "让 LLM 直接给意图标签。语义鲁棒，但 +50–200ms 延迟与 token 开销。",
+  },
+];
 
 interface SystemSettingsPageProps {
   onSaved?: (settings: EditableSystemSettings) => void;
@@ -24,6 +47,8 @@ const EMPTY_EDITABLE_SETTINGS: EditableSystemSettings = {
   chat_top_k: 3,
   chat_confidence_threshold: 0.2,
   default_eval_dataset: "zh-policy-smoke",
+  agent_router_provider: "keyword",
+  chat_history_max_turns: 5,
 };
 
 function formatLatency(latencyMs: number): string {
@@ -230,6 +255,54 @@ export default function SystemSettingsPage({ onSaved }: SystemSettingsPageProps)
                   }))
                 }
               />
+            </div>
+            <div className="field-group">
+              <label htmlFor="chat-history-max-turns">多轮对话上下文轮数</label>
+              <input
+                id="chat-history-max-turns"
+                type="number"
+                min={0}
+                max={20}
+                value={String(editableSettings.chat_history_max_turns)}
+                onChange={(event) =>
+                  setEditableSettings((current) => ({
+                    ...current,
+                    chat_history_max_turns: Number(
+                      event.target.value || current.chat_history_max_turns,
+                    ),
+                  }))
+                }
+              />
+              <p className="field-group__hint">
+                每次问答把前 N 轮 (user, assistant) 拼到 LLM messages 数组里。0 = 关闭多轮上下文（回到 single-shot）；上限 20，避免 token 爆炸。
+              </p>
+            </div>
+            <div className="field-group field-group--full">
+              <label htmlFor="agent-router-provider">Agent 路由策略（智能路由）</label>
+              <select
+                id="agent-router-provider"
+                value={editableSettings.agent_router_provider}
+                onChange={(event) =>
+                  setEditableSettings((current) => ({
+                    ...current,
+                    agent_router_provider: event.target.value as AgentRouterProvider,
+                  }))
+                }
+              >
+                {AGENT_ROUTER_PROVIDERS.map((option) => (
+                  <option key={option.value} value={option.value}>
+                    {option.label}
+                  </option>
+                ))}
+              </select>
+              <p className="field-group__hint">
+                {
+                  AGENT_ROUTER_PROVIDERS.find(
+                    (option) => option.value === editableSettings.agent_router_provider,
+                  )?.hint
+                }
+                {" "}三种策略链式回退：选定的策略挂了会自动降级到 embedding 再到 keyword，永远不会 5xx。
+              </p>
             </div>
           </div>
 

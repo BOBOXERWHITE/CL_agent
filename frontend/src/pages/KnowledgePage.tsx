@@ -8,6 +8,7 @@ import {
   checkKnowledgeEmbeddingReadiness,
   listKnowledgeJobs,
   rebuildKnowledgeIndex,
+  rechunkKnowledgeDocuments,
   runKnowledgeEmbeddingSmokeTest,
   uploadKnowledgeDocument,
 } from "../api/knowledge";
@@ -32,6 +33,7 @@ export default function KnowledgePage({
   const [jobs, setJobs] = useState<KnowledgeJob[]>([]);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [isRebuilding, setIsRebuilding] = useState(false);
+  const [isRechunking, setIsRechunking] = useState(false);
   const [deletingDocumentId, setDeletingDocumentId] = useState<string | null>(null);
   const [isCheckingReadiness, setIsCheckingReadiness] = useState(false);
   const [isRunningSmokeTest, setIsRunningSmokeTest] = useState(false);
@@ -92,6 +94,28 @@ export default function KnowledgePage({
       setErrorMessage(error instanceof Error ? error.message : "向量重建失败。");
     } finally {
       setIsRebuilding(false);
+    }
+  }
+
+  async function handleRechunk(job?: KnowledgeJob) {
+    setIsRechunking(true);
+    setErrorMessage("");
+    setSuccessMessage("");
+
+    try {
+      const result = await rechunkKnowledgeDocuments(
+        job ? { documentId: job.document_id } : {},
+      );
+      setSuccessMessage(
+        job
+          ? `已完成 ${job.filename} 的重切块，共 ${result.chunk_count} 个新分块。`
+          : `已完成 ${result.document_count} 份文档、${result.chunk_count} 个分块的重切块。`,
+      );
+      await loadJobs();
+    } catch (error: unknown) {
+      setErrorMessage(error instanceof Error ? error.message : "重新切块失败。");
+    } finally {
+      setIsRechunking(false);
     }
   }
 
@@ -278,7 +302,13 @@ export default function KnowledgePage({
             <button
               type="button"
               className="secondary-button"
-              disabled={isSubmitting || isRebuilding || deletingDocumentId !== null || staleJobCount === 0}
+              disabled={
+                isSubmitting ||
+                isRebuilding ||
+                isRechunking ||
+                deletingDocumentId !== null ||
+                staleJobCount === 0
+              }
               onClick={() => void handleRebuildStaleJobs()}
             >
               {isRebuilding ? "重建中..." : "重建待重建文档"}
@@ -286,10 +316,27 @@ export default function KnowledgePage({
             <button
               type="button"
               className="secondary-button"
-              disabled={isSubmitting || isRebuilding || deletingDocumentId !== null}
+              disabled={
+                isSubmitting || isRebuilding || isRechunking || deletingDocumentId !== null
+              }
               onClick={() => void handleRebuild()}
             >
               {isRebuilding ? "重建中..." : "重建向量索引"}
+            </button>
+            <button
+              type="button"
+              className="secondary-button"
+              title="读取原文件，按当前 chunker 逻辑重新切块（适用于 chunker 升级后）"
+              disabled={
+                isSubmitting ||
+                isRebuilding ||
+                isRechunking ||
+                deletingDocumentId !== null ||
+                completedJobCount === 0
+              }
+              onClick={() => void handleRechunk()}
+            >
+              {isRechunking ? "重切块中..." : "重新切块（全部）"}
             </button>
           </div>
         </div>
@@ -337,7 +384,13 @@ export default function KnowledgePage({
                       <button
                         type="button"
                         className="secondary-button"
-                        disabled={isSubmitting || isRebuilding || deletingDocumentId !== null || job.status !== "completed"}
+                        disabled={
+                          isSubmitting ||
+                          isRebuilding ||
+                          isRechunking ||
+                          deletingDocumentId !== null ||
+                          job.status !== "completed"
+                        }
                         onClick={() => void handleRebuild(job)}
                       >
                         重建此文档
@@ -345,7 +398,24 @@ export default function KnowledgePage({
                       <button
                         type="button"
                         className="secondary-button"
-                        disabled={isSubmitting || isRebuilding || deletingDocumentId !== null}
+                        title="读取原文件，按当前 chunker 逻辑重新切块"
+                        disabled={
+                          isSubmitting ||
+                          isRebuilding ||
+                          isRechunking ||
+                          deletingDocumentId !== null ||
+                          job.status !== "completed"
+                        }
+                        onClick={() => void handleRechunk(job)}
+                      >
+                        {isRechunking ? "重切块中..." : "重新切块"}
+                      </button>
+                      <button
+                        type="button"
+                        className="secondary-button"
+                        disabled={
+                          isSubmitting || isRebuilding || isRechunking || deletingDocumentId !== null
+                        }
                         onClick={() => void handleDelete(job)}
                       >
                         {deletingDocumentId === job.document_id ? "删除中..." : "删除此文档"}

@@ -15,7 +15,7 @@ from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.db.base import Base
-from app.db.models.agent import AgentRun
+from app.db.models.agent import AgentRun, AgentThread
 from app.db.models.agent_event import AgentEvent
 from app.services.agents.engine import EventType, TimelineEvent
 from app.services.agents.event_sink import persist_agent_events
@@ -50,11 +50,22 @@ def session() -> Iterator[Session]:
 
 
 def _make_agent_run(session: Session, *, run_id: str = "run-1", tenant_id: str = "t1") -> AgentRun:
+    session.add(
+        AgentThread(
+            id=run_id,
+            tenant_id=tenant_id,
+            customer_id="c1",
+            domain="policy",
+            specialist="policy_supervisor_agent",
+            status="active",
+        )
+    )
     run = AgentRun(
         id=run_id,
+        thread_id=run_id,
         tenant_id=tenant_id,
         customer_id="c1",
-        agent_name="travel_policy_agent",
+        agent_name="policy_supervisor_agent",
         route_name="policy_qa",
         status="completed",
         confidence=0.9,

@@ -12,11 +12,12 @@ from app.api.guards import require_tenant_match
 from app.core.audit import record_audit
 from app.core.metrics import observe_agent_run
 from app.core.security import AuthContext, require_roles
-from app.db.models.agent import AgentRun, ToolCallLog
+from app.db.models.agent import AgentRun, AgentThread, AgentThreadCheckpoint, ToolCallLog
 from app.db.models.agent_event import AgentEvent
 from app.db.models.rule import ReviewCase
 from app.db.session import get_session
 from app.schemas.agent import (
+    AgentCheckpointPayload,
     AgentRunCreateRequest,
     AgentRunListResponse,
     AgentRunPayload,
@@ -27,6 +28,12 @@ from app.schemas.agent import (
 from app.services.agents.event_sink import persist_agent_events
 from app.services.agents.graph import run_agent_workflow
 from app.services.agents.router import AgentRouteRequest
+from app.services.agents.thread_runtime import (
+    build_orchestration_trace,
+    build_trace_events,
+    persist_execution_checkpoint,
+    serialize_checkpoint_summary,
+)
 from app.services.rules.engine import (
     RuleEvaluationInput,
     create_review_case,
@@ -38,15 +45,89 @@ from app.services.rules.engine import (
 router = APIRouter(prefix="/api/agents", tags=["agents"])
 
 
-def _serialize_run(agent_run: AgentRun) -> AgentRunPayload:
+def _serialize_checkpoint(
+    checkpoint: AgentThreadCheckpoint | None,
+) -> AgentCheckpointPayload | None:
+    summary = serialize_checkpoint_summary(checkpoint)
+    if summary is None:
+        return None
+    return AgentCheckpointPayload(
+        id=str(summary["id"]),
+        checkpoint_type=str(summary["checkpoint_type"]),
+        status=str(summary["status"]),
+        created_at=checkpoint.created_at,
+    )
+
+
+def _resolve_latest_checkpoint(agent_run: AgentRun) -> AgentThreadCheckpoint | None:
+    thread = agent_run.thread
+    if thread is None or not thread.latest_checkpoint_id:
+        return None
+    for checkpoint in thread.checkpoints:
+        if checkpoint.id == thread.latest_checkpoint_id:
+            return checkpoint
+    return None
+
+
+def _load_event_map(session: Session, run_ids: list[str]) -> dict[str, list[AgentEvent]]:
+    if not run_ids:
+        return {}
+    rows = list(
+        session.execute(
+            select(AgentEvent)
+            .where(AgentEvent.agent_run_id.in_(run_ids))
+            .order_by(AgentEvent.agent_run_id.asc(), AgentEvent.sequence.asc())
+        ).scalars()
+    )
+    event_map: dict[str, list[AgentEvent]] = {run_id: [] for run_id in run_ids}
+    for row in rows:
+        event_map.setdefault(row.agent_run_id, []).append(row)
+    return event_map
+
+
+def _serialize_run(
+    agent_run: AgentRun,
+    *,
+    agent_events: list[AgentEvent] | None = None,
+) -> AgentRunPayload:
+    thread = agent_run.thread
+    latest_checkpoint = _resolve_latest_checkpoint(agent_run)
+    output = dict(agent_run.output_json or {})
+    trace_events = build_trace_events(
+        agent_events=agent_events,
+        checkpoint=latest_checkpoint,
+        pending_interrupt=dict(thread.pending_interrupt_json or {}) if thread is not None else {},
+    )
+    output["orchestration_trace"] = build_orchestration_trace(
+        output=output,
+        thread=thread,
+        checkpoint=latest_checkpoint,
+        agent_name=agent_run.agent_name,
+        route_name=agent_run.route_name,
+        confidence=agent_run.confidence,
+        timeline_nodes=agent_run.timeline_json,
+        tool_calls=[
+            {
+                "tool_name": tool_call.tool_name,
+                "status": tool_call.status,
+                "latency_ms": tool_call.latency_ms,
+            }
+            for tool_call in agent_run.tool_calls
+        ],
+        trace_events=trace_events,
+    )
     return AgentRunPayload(
         id=agent_run.id,
+        thread_id=agent_run.thread_id,
         agent_name=agent_run.agent_name,
         route_name=agent_run.route_name,
         status=agent_run.status,
         confidence=agent_run.confidence,
         requires_human_review=agent_run.requires_human_review,
-        output=agent_run.output_json,
+        output=output,
+        thread_status=thread.status if thread is not None else None,
+        pending_interrupt=dict(thread.pending_interrupt_json or {}) if thread is not None else {},
+        latest_checkpoint=_serialize_checkpoint(latest_checkpoint),
         timeline=[TimelineStepPayload.model_validate(step) for step in agent_run.timeline_json],
         tool_calls=[
             ToolCallPayload(
@@ -88,6 +169,8 @@ async def create_agent_run(
     tenant_id = require_tenant_match(payload.tenant_id, context)
     request.state.tenant_id = tenant_id
     request.state.customer_id = payload.customer_id
+    run_id = str(uuid4())
+    thread_id = payload.thread_id or str(uuid4())
 
     result = await asyncio.to_thread(
         run_agent_workflow,
@@ -95,12 +178,14 @@ async def create_agent_run(
             question=payload.question,
             tenant_id=tenant_id,
             customer_id=payload.customer_id,
+            run_id=run_id,
+            thread_id=thread_id,
+            user_id=context.user_id,
             ticket=payload.ticket.model_dump() if payload.ticket else None,
         ),
     )
 
-    run_id = str(uuid4())
-    request.state.session_id = run_id
+    request.state.session_id = thread_id
     request.state.model_name = result.agent_name
     request.state.token_usage = None
     # P5.2: the token usage sink uses ``agent_name`` to attribute spend
@@ -125,9 +210,35 @@ async def create_agent_run(
     run_status = (
         "needs_review" if requires_human_review and result.status == "completed" else result.status
     )
+    thread_domain = (
+        "ticket"
+        if result.route_name == "ticket_triage"
+        else "anomaly"
+        if result.route_name == "order_anomaly"
+        else "policy"
+    )
+
+    agent_thread = session.get(AgentThread, thread_id)
+    if agent_thread is None:
+        agent_thread = AgentThread(
+            id=thread_id,
+            tenant_id=tenant_id,
+            customer_id=payload.customer_id,
+            domain=thread_domain,
+            specialist=result.agent_name,
+            status="awaiting_review" if requires_human_review else "active",
+        )
+        session.add(agent_thread)
+        session.flush()
+    else:
+        agent_thread.domain = thread_domain
+        agent_thread.specialist = result.agent_name
+        agent_thread.status = "awaiting_review" if requires_human_review else "active"
+        session.add(agent_thread)
 
     agent_run = AgentRun(
         id=run_id,
+        thread_id=thread_id,
         tenant_id=tenant_id,
         customer_id=payload.customer_id,
         agent_name=result.agent_name,
@@ -141,6 +252,39 @@ async def create_agent_run(
     )
     session.add(agent_run)
     session.flush()
+
+    if result.interrupt is not None:
+        agent_thread.pending_interrupt_json = dict(result.interrupt)
+    elif not requires_human_review:
+        agent_thread.pending_interrupt_json = {}
+    agent_thread.memory_summary_json = {
+        "last_agent_name": result.agent_name,
+        "last_route_name": result.route_name,
+        "last_output_preview": str(output)[:400],
+        "updated_at": datetime.now(UTC).isoformat(),
+    }
+    checkpoint = persist_execution_checkpoint(
+        session,
+        thread=agent_thread,
+        agent_run_id=run_id,
+        result=result,
+        output_override=output,
+    )
+    output["orchestration_trace"] = build_orchestration_trace(
+        result=result,
+        output=output,
+        thread=agent_thread,
+        checkpoint=checkpoint,
+    )
+    agent_run.output_json = dict(output)
+    session.add(agent_run)
+    session.add(agent_thread)
+
+    if agent_thread.latest_checkpoint_id:
+        checkpoint = session.get(AgentThreadCheckpoint, agent_thread.latest_checkpoint_id)
+        if checkpoint is not None and checkpoint.agent_run_id is None:
+            checkpoint.agent_run_id = run_id
+            session.add(checkpoint)
 
     for tool_call in result.tool_calls:
         session.add(
@@ -181,6 +325,7 @@ async def create_agent_run(
             "confidence": result.confidence,
             "tool_call_count": len(result.tool_calls),
             "has_ticket": payload.ticket is not None,
+            "thread_id": thread_id,
         },
     )
     session.commit()
@@ -204,6 +349,8 @@ async def create_agent_run(
             payload={
                 "agent_name": result.agent_name,
                 "agent_run_id": run_id,
+                "thread_id": thread_id,
+                "interrupt": dict(result.interrupt or {}),
                 "question": payload.question,
                 "ticket": payload.ticket.model_dump() if payload.ticket else None,
             },
@@ -222,9 +369,15 @@ async def create_agent_run(
     observe_agent_run(result.agent_name, agent_run.status)
     session.refresh(agent_run)
     agent_run = session.execute(
-        select(AgentRun).options(selectinload(AgentRun.tool_calls)).where(AgentRun.id == run_id)
+        select(AgentRun)
+        .options(
+            selectinload(AgentRun.tool_calls),
+            selectinload(AgentRun.thread).selectinload(AgentThread.checkpoints),
+        )
+        .where(AgentRun.id == run_id)
     ).scalar_one()
-    return _serialize_run(agent_run)
+    event_map = _load_event_map(session, [run_id])
+    return _serialize_run(agent_run, agent_events=event_map.get(run_id, []))
 
 
 def _next_event_sequence(session: Session, agent_run_id: str) -> int:
@@ -290,10 +443,14 @@ def resume_agent_run(
             detail=f"agent run is in status {agent_run.status!r}, not resumable",
         )
 
-    new_status = "completed" if payload.decision == "approve" else "rejected"
+    new_status = "completed" if payload.decision in {"approve", "edit"} else "rejected"
     agent_run.status = new_status
     agent_run.requires_human_review = False
     output = dict(agent_run.output_json)
+    if payload.decision == "edit":
+        if not payload.edited_answer:
+            raise HTTPException(status_code=422, detail="edited_answer is required for edit")
+        output["answer"] = payload.edited_answer
     output["resolution"] = {
         "decision": payload.decision,
         "note": payload.note,
@@ -303,6 +460,12 @@ def resume_agent_run(
     agent_run.output_json = output
     session.add(agent_run)
     session.flush()
+
+    thread = session.get(AgentThread, agent_run.thread_id)
+    if thread is not None:
+        thread.status = "active" if payload.decision in {"approve", "edit"} else "rejected"
+        thread.pending_interrupt_json = {}
+        session.add(thread)
 
     # Append structured RESUME event so ``agent_event`` is the source of
     # truth for the whole lifecycle.
@@ -350,7 +513,7 @@ def resume_agent_run(
             if (case.payload_json or {}).get("agent_run_id") == agent_run.id
         ]
     for case in linked_cases:
-        case.status = "resolved" if payload.decision == "approve" else "rejected"
+        case.status = "resolved" if payload.decision in {"approve", "edit"} else "rejected"
         case.resolved_by = context.user_id
         case.resolution_note = payload.note
         session.add(case)
@@ -373,9 +536,15 @@ def resume_agent_run(
 
     observe_agent_run(agent_run.agent_name, new_status)
     agent_run = session.execute(
-        select(AgentRun).options(selectinload(AgentRun.tool_calls)).where(AgentRun.id == run_id)
+        select(AgentRun)
+        .options(
+            selectinload(AgentRun.tool_calls),
+            selectinload(AgentRun.thread).selectinload(AgentThread.checkpoints),
+        )
+        .where(AgentRun.id == run_id)
     ).scalar_one()
-    return _serialize_run(agent_run)
+    event_map = _load_event_map(session, [run_id])
+    return _serialize_run(agent_run, agent_events=event_map.get(run_id, []))
 
 
 @router.get("/runs", response_model=AgentRunListResponse)
@@ -383,9 +552,17 @@ def list_agent_runs(
     _: AuthContext = Depends(require_roles("admin", "operator", "reviewer")),
     session: Session = Depends(get_session),
 ) -> AgentRunListResponse:
-    rows = session.execute(
-        select(AgentRun)
-        .options(selectinload(AgentRun.tool_calls))
-        .order_by(AgentRun.created_at.desc())
-    ).scalars()
-    return AgentRunListResponse(items=[_serialize_run(row) for row in rows])
+    rows = list(
+        session.execute(
+            select(AgentRun)
+            .options(
+                selectinload(AgentRun.tool_calls),
+                selectinload(AgentRun.thread).selectinload(AgentThread.checkpoints),
+            )
+            .order_by(AgentRun.created_at.desc())
+        ).scalars()
+    )
+    event_map = _load_event_map(session, [row.id for row in rows])
+    return AgentRunListResponse(
+        items=[_serialize_run(row, agent_events=event_map.get(row.id, [])) for row in rows]
+    )

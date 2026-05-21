@@ -54,6 +54,9 @@ class Tool(ABC):
     description: ClassVar[str]
     input_model: ClassVar[type[BaseModel]]
     output_model: ClassVar[type[BaseModel]]
+    risk_level: ClassVar[str] = "low"
+    requires_approval: ClassVar[bool] = False
+    idempotency_scope: ClassVar[str] = "request"
 
     @abstractmethod
     def invoke(self, payload: BaseModel) -> BaseModel:
@@ -73,6 +76,9 @@ class Tool(ABC):
         return {
             "name": cls.name,
             "description": cls.description,
+            "risk_level": cls.risk_level,
+            "requires_approval": cls.requires_approval,
+            "idempotency_scope": cls.idempotency_scope,
             "input_schema": cls.input_model.model_json_schema(),
             "output_schema": cls.output_model.model_json_schema(),
         }

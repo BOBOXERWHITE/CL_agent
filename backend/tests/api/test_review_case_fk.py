@@ -16,7 +16,7 @@ from uuid import uuid4
 
 from fastapi.testclient import TestClient
 
-from app.db.models.agent import AgentRun
+from app.db.models.agent import AgentRun, AgentThread
 from app.db.models.rule import ReviewCase
 from app.db.session import SessionLocal
 
@@ -58,11 +58,22 @@ def test_resume_finds_linked_case_via_fk_column(client: TestClient) -> None:
     case_id = str(uuid4())
     with SessionLocal() as session:
         session.add(
-            AgentRun(
+            AgentThread(
                 id=run_id,
                 tenant_id="t1",
                 customer_id="c1",
-                agent_name="travel_policy_agent",
+                domain="policy",
+                specialist="policy_supervisor_agent",
+                status="awaiting_review",
+            )
+        )
+        session.add(
+            AgentRun(
+                id=run_id,
+                thread_id=run_id,
+                tenant_id="t1",
+                customer_id="c1",
+                agent_name="policy_supervisor_agent",
                 route_name="policy_qa",
                 status="awaiting_review",
                 confidence=0.5,
@@ -108,11 +119,22 @@ def test_resume_falls_back_to_payload_json_for_legacy_rows(client: TestClient) -
     case_id = str(uuid4())
     with SessionLocal() as session:
         session.add(
-            AgentRun(
+            AgentThread(
                 id=run_id,
                 tenant_id="t1",
                 customer_id="c1",
-                agent_name="travel_policy_agent",
+                domain="policy",
+                specialist="policy_supervisor_agent",
+                status="awaiting_review",
+            )
+        )
+        session.add(
+            AgentRun(
+                id=run_id,
+                thread_id=run_id,
+                tenant_id="t1",
+                customer_id="c1",
+                agent_name="policy_supervisor_agent",
                 route_name="policy_qa",
                 status="awaiting_review",
                 confidence=0.5,

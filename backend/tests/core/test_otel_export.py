@@ -138,7 +138,7 @@ def test_business_span_via_policy_qa_helpers(
     from sqlalchemy.orm import Session, sessionmaker
 
     from app.db.base import Base
-    from app.db.models.agent import AgentRun
+    from app.db.models.agent import AgentRun, AgentThread
     from app.services.agents.engine import EventType, TimelineEvent
     from app.services.agents.event_sink import persist_agent_events
 
@@ -168,8 +168,19 @@ def test_business_span_via_policy_qa_helpers(
     session = next(_session())
     run_id = str(uuid4())
     session.add(
+        AgentThread(
+            id=run_id,
+            tenant_id="t1",
+            customer_id="c1",
+            domain="policy",
+            specialist="policy_supervisor_agent",
+            status="active",
+        )
+    )
+    session.add(
         AgentRun(
             id=run_id,
+            thread_id=run_id,
             tenant_id="t1",
             customer_id="c1",
             agent_name="x",

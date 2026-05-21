@@ -46,3 +46,9 @@ frontend/.env.local
 Thumbs.db
 .vscode/
 .idea/
+
+# Personal resume / interview materials — never publish
+resume/
+
+# Per-user Claude Code local settings (permissions / etc.)
+.claude/settings.local.json

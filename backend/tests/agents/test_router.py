@@ -3,7 +3,7 @@ from __future__ import annotations
 from app.services.agents.router import AgentRouteRequest, choose_route
 
 
-def test_router_sends_policy_question_to_rag_agent() -> None:
+def test_router_sends_policy_question_to_supervisor_agent() -> None:
     route = choose_route(
         AgentRouteRequest(
             question="北京酒店报销上限是多少？",
@@ -12,9 +12,10 @@ def test_router_sends_policy_question_to_rag_agent() -> None:
         )
     )
 
-    assert route.agent_name == "travel_policy_agent"
+    assert route.agent_name == "policy_supervisor_agent"
     assert route.route_name == "policy_qa"
     assert route.requires_human_review is False
+    assert route.domain == "policy"
 
 
 def test_router_sends_ticket_payload_to_ticket_router_agent() -> None:

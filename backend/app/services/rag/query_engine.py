@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from time import perf_counter
 
 from sqlalchemy import select
@@ -63,6 +63,9 @@ class StreamReadyContext:
     client_model_name: str
     tenant_id: str
     question: str
+    # P11: prior conversation turns flattened into [user, assistant, ...].
+    # Empty list when multi-turn is disabled or this is a fresh session.
+    history_messages: list[dict[str, str]] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -71,6 +74,37 @@ class RetrievalTraceChunk:
     document_id: str
     document_title: str
     score: float
+
+
+@dataclass(frozen=True)
+class CragRoundTrace:
+    """One CRAG evaluator round captured for the trace panel.
+
+    ``round_index`` is 1-based for human readability; round 1 is the
+    evaluation right after the initial retrieval, round 2 follows the
+    first re-retrieval, and so on.
+    """
+
+    round_index: int
+    sufficiency_score: float
+    covered_aspects: list[str]
+    missing_aspects: list[str]
+    suggested_queries: list[str]
+    triggered_re_retrieval: bool
+    new_chunks_added: int
+    reasoning: str
+
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "round_index": self.round_index,
+            "sufficiency_score": self.sufficiency_score,
+            "covered_aspects": list(self.covered_aspects),
+            "missing_aspects": list(self.missing_aspects),
+            "suggested_queries": list(self.suggested_queries),
+            "triggered_re_retrieval": self.triggered_re_retrieval,
+            "new_chunks_added": self.new_chunks_added,
+            "reasoning": self.reasoning,
+        }
 
 
 @dataclass(frozen=True)
@@ -85,6 +119,7 @@ class RetrievalTrace:
     expanded_query: str
     rewrite_rules: list[str]
     candidate_count: int
+    crag_rounds: list[CragRoundTrace] = field(default_factory=list)
 
     def as_dict(self) -> dict[str, object]:
         return {
@@ -106,11 +141,39 @@ class RetrievalTrace:
             "expanded_query": self.expanded_query,
             "rewrite_rules": self.rewrite_rules,
             "candidate_count": self.candidate_count,
+            "crag_rounds": [round_.as_dict() for round_ in self.crag_rounds],
         }
 
 
 def _is_chinese_query(question: str) -> bool:
     return bool(extract_cjk_sequences(question))
+
+
+def _coverage_aware_confidence(citations: list[CitationRecord]) -> float:
+    """Inflate top_score when retrieval spans multiple distinct documents.
+
+    Background: for multi-hop queries that span several sub-questions, no
+    single chunk fully matches the original prompt, so the reranker's
+    ``top_score`` plateaus around 0.2–0.4 even when the corpus actually
+    contains the answer (split across docs). The raw score then falsely
+    triggers the low-confidence fallback.
+
+    Heuristic: reward distinct-doc coverage with a small multiplier — each
+    additional document beyond the first adds 25%, capped so a single
+    well-matched doc still scores higher than a thinly-spread fan-out.
+
+    Examples (CHAT_TOP_K=8):
+    - 1 doc, top 0.71 → 0.71 (unchanged)
+    - 2 docs, top 0.20 → 0.25
+    - 3 docs, top 0.20 → 0.30
+    - 4+ docs, top 0.20 → 0.30 (capped at +0.5x)
+    """
+    if not citations:
+        return 0.0
+    raw_top = max(0.0, min(citations[0].score, 1.0))
+    distinct_doc_count = len({citation.document_id for citation in citations})
+    coverage_factor = 1.0 + 0.25 * min(distinct_doc_count - 1, 2)
+    return min(1.0, raw_top * coverage_factor)
 
 
 def _load_chunk_map(
@@ -260,6 +323,7 @@ def _build_trace(
     expanded_query: str,
     rewrite_rules: list[str],
     candidate_count: int,
+    crag_rounds: list[CragRoundTrace] | None = None,
 ) -> RetrievalTrace:
     selected_chunks = [
         RetrievalTraceChunk(
@@ -281,11 +345,169 @@ def _build_trace(
         expanded_query=expanded_query,
         rewrite_rules=rewrite_rules,
         candidate_count=candidate_count,
+        crag_rounds=list(crag_rounds or []),
     )
 
 
+async def _run_crag_loop(
+    *,
+    question: str,
+    citations: list[CitationRecord],
+    retrievals: list[tuple[KnowledgeChunk, KnowledgeDocument, float]],
+    tenant_id: str,
+    customer_id: str,
+    top_k: int,
+) -> tuple[
+    list[CitationRecord],
+    list[tuple[KnowledgeChunk, KnowledgeDocument, float]],
+    list[CragRoundTrace],
+]:
+    """Run multi-round CRAG: evaluate evidence, optionally re-retrieve, repeat.
+
+    The loop terminates on any of:
+    - Evaluator reports ``sufficiency >= threshold``.
+    - ``crag_max_rounds`` reached.
+    - **Anti-loop**: a re-retrieval round added zero new chunks (queries
+      retrieved only chunks already in the pool).
+    - **Anti-loop**: ``missing_aspects`` is unchanged from the previous
+      round (evaluator stuck on the same complaint).
+    - Evaluator returns no ``suggested_queries``.
+
+    On any unhandled exception the loop returns the inputs untouched so
+    the chat path stays online (CRAG is fail-open by design).
+    """
+    import asyncio
+
+    from app.services.rag.evidence_evaluator import (
+        EvidenceEvaluation,
+        get_evidence_evaluator,
+    )
+
+    settings = get_settings()
+    if not settings.crag_enabled:
+        return citations, retrievals, []
+
+    evaluator = get_evidence_evaluator()
+    threshold = settings.crag_sufficiency_threshold
+    max_rounds = max(1, settings.crag_max_rounds)
+
+    rounds: list[CragRoundTrace] = []
+    current_citations = list(citations)
+    current_retrievals = list(retrievals)
+    seen_chunk_ids: set[str] = {chunk.id for chunk, _doc, _score in current_retrievals}
+    last_missing: tuple[str, ...] | None = None
+
+    for round_index in range(1, max_rounds + 1):
+        try:
+            evaluation: EvidenceEvaluation = await evaluator.evaluate_async(
+                question, current_citations
+            )
+        except Exception as exc:
+            _log = __import__("logging").getLogger(__name__)
+            _log.warning("crag_loop_evaluator_unhandled", extra={"error": str(exc)})
+            break
+
+        if evaluation.is_sufficient(threshold) or not evaluation.suggested_queries:
+            rounds.append(
+                CragRoundTrace(
+                    round_index=round_index,
+                    sufficiency_score=evaluation.sufficiency_score,
+                    covered_aspects=list(evaluation.covered_aspects),
+                    missing_aspects=list(evaluation.missing_aspects),
+                    suggested_queries=list(evaluation.suggested_queries),
+                    triggered_re_retrieval=False,
+                    new_chunks_added=0,
+                    reasoning=evaluation.reasoning,
+                )
+            )
+            break
+
+        # Anti-loop: same missing aspects two rounds in a row → break.
+        missing_signature = tuple(sorted(evaluation.missing_aspects))
+        if last_missing is not None and missing_signature == last_missing:
+            rounds.append(
+                CragRoundTrace(
+                    round_index=round_index,
+                    sufficiency_score=evaluation.sufficiency_score,
+                    covered_aspects=list(evaluation.covered_aspects),
+                    missing_aspects=list(evaluation.missing_aspects),
+                    suggested_queries=list(evaluation.suggested_queries),
+                    triggered_re_retrieval=False,
+                    new_chunks_added=0,
+                    reasoning=(evaluation.reasoning + " [anti-loop: missing unchanged]").strip(),
+                )
+            )
+            break
+        last_missing = missing_signature
+
+        # Re-retrieve with each suggested query, merge, dedupe by chunk_id.
+        new_retrievals: list[tuple[KnowledgeChunk, KnowledgeDocument, float]] = []
+        for sub_query in evaluation.suggested_queries:
+            try:
+                hits = await asyncio.to_thread(
+                    _hybrid_search, sub_query, tenant_id, customer_id, top_k
+                )
+            except Exception as exc:
+                _log = __import__("logging").getLogger(__name__)
+                _log.warning(
+                    "crag_loop_subquery_retrieve_failed",
+                    extra={"error": str(exc), "sub_query": sub_query[:120]},
+                )
+                continue
+            for chunk, document, score in hits:
+                if chunk.id in seen_chunk_ids:
+                    continue
+                seen_chunk_ids.add(chunk.id)
+                new_retrievals.append((chunk, document, score))
+
+        if not new_retrievals:
+            # Anti-loop: zero new chunks → no point in another round.
+            rounds.append(
+                CragRoundTrace(
+                    round_index=round_index,
+                    sufficiency_score=evaluation.sufficiency_score,
+                    covered_aspects=list(evaluation.covered_aspects),
+                    missing_aspects=list(evaluation.missing_aspects),
+                    suggested_queries=list(evaluation.suggested_queries),
+                    triggered_re_retrieval=True,
+                    new_chunks_added=0,
+                    reasoning=(evaluation.reasoning + " [anti-loop: no new chunks]").strip(),
+                )
+            )
+            break
+
+        # Merge new retrievals into the pool. Keep the top-K-ish ranked by
+        # score-desc so the citation set doesn't balloon unboundedly.
+        current_retrievals = current_retrievals + new_retrievals
+        current_retrievals.sort(key=lambda triple: triple[2], reverse=True)
+        # Cap the working set at 2× top_k so the answer LLM still gets a
+        # focused evidence pack and the next evaluator round stays under
+        # token budget.
+        current_retrievals = current_retrievals[: max(top_k * 2, top_k + len(new_retrievals))]
+        current_citations = build_citations(current_retrievals)
+
+        rounds.append(
+            CragRoundTrace(
+                round_index=round_index,
+                sufficiency_score=evaluation.sufficiency_score,
+                covered_aspects=list(evaluation.covered_aspects),
+                missing_aspects=list(evaluation.missing_aspects),
+                suggested_queries=list(evaluation.suggested_queries),
+                triggered_re_retrieval=True,
+                new_chunks_added=len(new_retrievals),
+                reasoning=evaluation.reasoning,
+            )
+        )
+
+    return current_citations, current_retrievals, rounds
+
+
 async def answer_policy_question_async(
-    question: str, tenant_id: str, customer_id: str
+    question: str,
+    tenant_id: str,
+    customer_id: str,
+    *,
+    chat_history_messages: list[dict[str, str]] | None = None,
 ) -> PolicyAnswerResult:
     """Async twin of :func:`answer_policy_question` (P4.2).
 
@@ -387,6 +609,7 @@ async def answer_policy_question_async(
 
     citations = build_citations(retrievals)
     candidate_count = len(retrievals)
+    crag_rounds: list[CragRoundTrace] = []
     if not citations:
         no_evidence_answer = (
             "当前没有检索到足够的政策证据，暂时无法给出可信回答。"
@@ -412,8 +635,30 @@ async def answer_policy_question_async(
             prompt_template_id=prompt_selection.id,
         )
 
-    evidence_snippets = [citation.snippet for citation in citations]
-    top_score = max(0.0, min(citations[0].score, 1.0))
+    # --- Stage 3: CRAG multi-round evaluator + targeted re-retrieval ---
+    # Off-by-default; controlled by CRAG_ENABLED. Failure-isolated — any
+    # exception inside the helper returns the original (citations,
+    # retrievals) so the answer path stays online. Trace panel surfaces
+    # every round so operators can debug "why was it re-queried" /
+    # "why wasn't it".
+    with trace_span("policy_qa.crag", tenant_id=tenant_id):
+        citations, retrievals, crag_rounds = await _run_crag_loop(
+            question=question,
+            citations=citations,
+            retrievals=retrievals,
+            tenant_id=tenant_id,
+            customer_id=customer_id,
+            top_k=business_settings.chat_top_k,
+        )
+    candidate_count = len(retrievals)
+    if crag_rounds:
+        retrieval_mode = retrieval_mode + "+crag"
+
+    # Feed the LLM the full chunk content, not the 220-char UI snippet — the
+    # snippet exists for the trace panel; truncating it before answer
+    # generation hides facts that retrieval already found.
+    evidence_snippets = [citation.full_content for citation in citations]
+    top_score = _coverage_aware_confidence(citations)
     if top_score < business_settings.chat_confidence_threshold:
         low_confidence_answer = (
             "我找到了相关政策片段，但当前证据强度还不足以给出高置信回答。"
@@ -430,6 +675,7 @@ async def answer_policy_question_async(
             expanded_query=rewritten_query.expanded_query,
             rewrite_rules=rewritten_query.applied_rules,
             candidate_count=candidate_count,
+            crag_rounds=crag_rounds,
         )
         return PolicyAnswerResult(
             answer=low_confidence_answer,
@@ -460,6 +706,7 @@ async def answer_policy_question_async(
             expanded_query=rewritten_query.expanded_query,
             rewrite_rules=[*rewritten_query.applied_rules, "answer_cache_hit"],
             candidate_count=candidate_count,
+            crag_rounds=crag_rounds,
         )
         return PolicyAnswerResult(
             answer=str(cached_answer["answer"]),
@@ -482,6 +729,7 @@ async def answer_policy_question_async(
             evidence_snippets=evidence_snippets,
             confidence=top_score,
             prompt_template=prompt_selection.template,
+            history_messages=chat_history_messages,
         )
         # Attach usage after the call so the OTLP backend can attribute
         # tokens to this exact span (billing-grade trace view).
@@ -515,6 +763,7 @@ async def answer_policy_question_async(
         expanded_query=rewritten_query.expanded_query,
         rewrite_rules=rewritten_query.applied_rules,
         candidate_count=candidate_count,
+        crag_rounds=crag_rounds,
     )
     return PolicyAnswerResult(
         answer=answer_draft.answer,
@@ -603,8 +852,11 @@ def answer_policy_question(question: str, tenant_id: str, customer_id: str) -> P
             prompt_template_id=prompt_selection.id,
         )
 
-    evidence_snippets = [citation.snippet for citation in citations]
-    top_score = max(0.0, min(citations[0].score, 1.0))
+    # Feed the LLM the full chunk content, not the 220-char UI snippet — the
+    # snippet exists for the trace panel; truncating it before answer
+    # generation hides facts that retrieval already found.
+    evidence_snippets = [citation.full_content for citation in citations]
+    top_score = _coverage_aware_confidence(citations)
     if top_score < business_settings.chat_confidence_threshold:
         low_confidence_answer = (
             "我找到了相关政策片段，但当前证据强度还不足以给出高置信回答。"
@@ -721,7 +973,11 @@ def answer_policy_question(question: str, tenant_id: str, customer_id: str) -> P
 
 
 async def prepare_answer_context_async(
-    question: str, tenant_id: str, customer_id: str
+    question: str,
+    tenant_id: str,
+    customer_id: str,
+    *,
+    chat_history_messages: list[dict[str, str]] | None = None,
 ) -> PolicyAnswerResult | StreamReadyContext:
     """P7.1 prep phase: rewrite + retrieve + cache check.
 
@@ -823,8 +1079,11 @@ async def prepare_answer_context_async(
             prompt_template_id=prompt_selection.id,
         )
 
-    evidence_snippets = [citation.snippet for citation in citations]
-    top_score = max(0.0, min(citations[0].score, 1.0))
+    # Feed the LLM the full chunk content, not the 220-char UI snippet — the
+    # snippet exists for the trace panel; truncating it before answer
+    # generation hides facts that retrieval already found.
+    evidence_snippets = [citation.full_content for citation in citations]
+    top_score = _coverage_aware_confidence(citations)
 
     # Early exit: low confidence.
     if top_score < business_settings.chat_confidence_threshold:
@@ -895,6 +1154,7 @@ async def prepare_answer_context_async(
         client_model_name=client_model_name,
         tenant_id=tenant_id,
         question=question,
+        history_messages=list(chat_history_messages or []),
     )
 
 
@@ -911,6 +1171,7 @@ async def stream_answer_from_context(context: StreamReadyContext):
         evidence_snippets=context.evidence_snippets,
         confidence=context.top_score,
         prompt_template=context.prompt_selection.template,  # type: ignore[attr-defined]
+        history_messages=context.history_messages or None,
     ):
         yield chunk
 

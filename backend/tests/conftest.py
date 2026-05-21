@@ -134,3 +134,31 @@ def seeded_multilingual_policy_chunks(multilingual_docx_file: bytes) -> None:
         tenant_id="t1",
         customer_id="c1",
     )
+
+
+_HOTEL_KB_DIR = Path(__file__).resolve().parents[2] / "docs" / "knowledge-base" / "hotel"
+
+
+@pytest.fixture()
+def seeded_hotel_knowledge_base() -> None:
+    """Ingest every ``docs/knowledge-base/hotel/*.md`` into tenant ``t1``.
+
+    Used by the multi-hop eval baseline so the runner exercises the real
+    differential-rate / breakfast / invoice / weekend-stay policy text
+    rather than the trimmed fixture used by the smoke dataset.
+    """
+    if not _HOTEL_KB_DIR.is_dir():
+        pytest.skip(f"hotel kb directory missing: {_HOTEL_KB_DIR}")
+
+    markdown_files = sorted(_HOTEL_KB_DIR.glob("*.md"))
+    if not markdown_files:
+        pytest.skip(f"no markdown files under {_HOTEL_KB_DIR}")
+
+    for path in markdown_files:
+        start_ingestion(
+            file_bytes=path.read_bytes(),
+            filename=path.name,
+            content_type="text/markdown",
+            tenant_id="t1",
+            customer_id="c1",
+        )

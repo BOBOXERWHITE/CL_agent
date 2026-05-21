@@ -171,6 +171,7 @@ def _run_result_to_execution(
     final = run_result.state.scratchpad.get("final") or {}
     queue_name = str(final.get("queue_name", "ops-general"))
     reason = str(final.get("reason", ""))
+    tool_calls = _collect_tool_call_records(run_result.state)
 
     timeline = list(base_timeline)
     append_timeline_step(
@@ -198,6 +199,13 @@ def _run_result_to_execution(
         detail="工单需要进入人工处理队列。",
     )
 
+    interrupt = {
+        "kind": "human_review",
+        "reason": "ticket routing requires operator review",
+        "queue_name": queue_name,
+        "allowed_decisions": ["approve", "edit", "reject"],
+    }
+
     return AgentExecutionResult(
         agent_name="ticket_router_agent",
         route_name=route_name,
@@ -209,8 +217,19 @@ def _run_result_to_execution(
             "reason": reason,
         },
         timeline=timeline,
-        tool_calls=_collect_tool_call_records(run_result.state),
+        tool_calls=tool_calls,
         engine_events=list(run_result.events),
+        interrupt=interrupt,
+        checkpoint_payload={
+            "question": question,
+            "output": {
+                "queue_name": queue_name,
+                "reason": reason,
+            },
+            "queue_name": queue_name,
+            "review_interrupt": interrupt,
+        },
+        checkpoint_type="engine_adapter_state",
     )
 
 

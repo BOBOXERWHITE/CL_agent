@@ -1,6 +1,7 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { vi } from "vitest";
 
+import * as settingsApi from "../../src/api/settings";
 import SystemSettingsPage from "../../src/pages/SystemSettingsPage";
 
 vi.mock("../../src/api/chat", () => ({
@@ -65,6 +66,7 @@ vi.mock("../../src/api/settings", () => ({
       chat_top_k: 3,
       chat_confidence_threshold: 0.2,
       default_eval_dataset: "zh-policy-smoke",
+      agent_router_provider: "keyword",
     },
     runtime_settings: {
       llm_provider: "deterministic",
@@ -83,6 +85,7 @@ vi.mock("../../src/api/settings", () => ({
       chat_top_k: 5,
       chat_confidence_threshold: 0.35,
       default_eval_dataset: "zh-policy-smoke",
+      agent_router_provider: "embedding",
     },
     runtime_settings: {
       llm_provider: "deterministic",
@@ -119,6 +122,9 @@ test("loads and saves system settings while showing runtime config", async () =>
   fireEvent.change(screen.getByLabelText("低置信度阈值"), {
     target: { value: "0.35" },
   });
+  fireEvent.change(screen.getByLabelText("Agent 路由策略（智能路由）"), {
+    target: { value: "embedding" },
+  });
   fireEvent.click(screen.getByRole("button", { name: "保存设置" }));
 
   await waitFor(() => {
@@ -126,6 +132,9 @@ test("loads and saves system settings while showing runtime config", async () =>
   });
 
   expect(screen.getByDisplayValue("企业租户")).toBeInTheDocument();
+  expect(vi.mocked(settingsApi.updateSystemSettings)).toHaveBeenCalledWith(
+    expect.objectContaining({ agent_router_provider: "embedding" }),
+  );
 
   fireEvent.click(screen.getByRole("button", { name: "检查 LLM 网关" }));
   await waitFor(() => {

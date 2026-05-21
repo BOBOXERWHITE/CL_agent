@@ -7,6 +7,7 @@ class ChatAskRequest(BaseModel):
     question: str = Field(min_length=1)
     tenant_id: str = "default-tenant"
     customer_id: str = "default-customer"
+    thread_id: str | None = None
     session_id: str | None = None
 
 
@@ -55,6 +56,17 @@ class RetrievalTraceChunkPayload(BaseModel):
     score: float
 
 
+class CragRoundPayload(BaseModel):
+    round_index: int
+    sufficiency_score: float
+    covered_aspects: list[str] = Field(default_factory=list)
+    missing_aspects: list[str] = Field(default_factory=list)
+    suggested_queries: list[str] = Field(default_factory=list)
+    triggered_re_retrieval: bool = False
+    new_chunks_added: int = 0
+    reasoning: str = ""
+
+
 class RetrievalTracePayload(BaseModel):
     mode: str
     prompt_name: str
@@ -66,9 +78,11 @@ class RetrievalTracePayload(BaseModel):
     expanded_query: str | None = None
     rewrite_rules: list[str] = Field(default_factory=list)
     candidate_count: int = 0
+    crag_rounds: list[CragRoundPayload] = Field(default_factory=list)
 
 
 class ChatAskResponse(BaseModel):
+    thread_id: str
     session_id: str
     answer: str
     confidence: float

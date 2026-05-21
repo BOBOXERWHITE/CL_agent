@@ -132,6 +132,9 @@ class PolicySearchTool(Tool):
         "Search the tenant's policy knowledge base and generate a grounded answer "
         "with citations. Use this for any travel-policy question."
     )
+    risk_level = "low"
+    requires_approval = False
+    idempotency_scope = "thread"
     input_model = PolicySearchInput
     output_model = PolicySearchOutput
 

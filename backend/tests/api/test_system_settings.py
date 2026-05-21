@@ -39,6 +39,8 @@ def test_admin_can_read_and_update_system_settings(secured_client: TestClient) -
         "chat_top_k": 3,
         "chat_confidence_threshold": 0.2,
         "default_eval_dataset": "zh-policy-smoke",
+        "agent_router_provider": "keyword",
+        "chat_history_max_turns": 5,
     }
 
     update_response = secured_client.put(
@@ -50,6 +52,8 @@ def test_admin_can_read_and_update_system_settings(secured_client: TestClient) -
             "chat_top_k": 5,
             "chat_confidence_threshold": 0.35,
             "default_eval_dataset": "zh-policy-smoke",
+            "agent_router_provider": "embedding",
+            "chat_history_max_turns": 8,
         },
     )
 
@@ -57,6 +61,28 @@ def test_admin_can_read_and_update_system_settings(secured_client: TestClient) -
     assert update_response.json()["editable_settings"]["default_tenant_id"] == "演示租户"
     assert update_response.json()["editable_settings"]["chat_top_k"] == 5
     assert update_response.json()["editable_settings"]["chat_confidence_threshold"] == 0.35
+    assert update_response.json()["editable_settings"]["agent_router_provider"] == "embedding"
+    assert update_response.json()["editable_settings"]["chat_history_max_turns"] == 8
+
+
+def test_admin_cannot_save_unknown_router_provider(secured_client: TestClient) -> None:
+    response = secured_client.put(
+        "/api/settings/system",
+        headers={"Authorization": "Bearer admin-token"},
+        json={
+            "default_tenant_id": "演示租户",
+            "default_customer_id": "演示客户",
+            "chat_top_k": 5,
+            "chat_confidence_threshold": 0.35,
+            "default_eval_dataset": "zh-policy-smoke",
+            "agent_router_provider": "magic",
+            "chat_history_max_turns": 5,
+        },
+    )
+
+    # Pydantic Literal rejects values outside ``llm | embedding | keyword``
+    # so a typo'd payload never reaches the router strategy chain.
+    assert response.status_code == 422
 
 
 def test_operator_cannot_update_system_settings(secured_client: TestClient) -> None:
@@ -69,6 +95,8 @@ def test_operator_cannot_update_system_settings(secured_client: TestClient) -> N
             "chat_top_k": 5,
             "chat_confidence_threshold": 0.35,
             "default_eval_dataset": "zh-policy-smoke",
+            "agent_router_provider": "keyword",
+            "chat_history_max_turns": 5,
         },
     )
 

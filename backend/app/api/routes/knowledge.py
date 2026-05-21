@@ -27,6 +27,7 @@ from app.services.ingestion.pipeline import (
     get_job,
     list_jobs,
     rebuild_knowledge_index,
+    rechunk_knowledge_document,
 )
 from app.services.rag.embedding_client import check_embedding_readiness, run_embedding_smoke_test
 from app.workers.tasks import submit_ingestion
@@ -151,6 +152,38 @@ def rebuild_knowledge_vectors(
         raise BadRequest(str(exc), error_code="INVALID_REBUILD_REQUEST") from exc
     except RuntimeError as exc:
         raise UpstreamError(str(exc), error_code="REINDEX_UPSTREAM_FAILED") from exc
+
+    return KnowledgeRebuildResult(
+        scope=result.scope,
+        document_count=result.document_count,
+        chunk_count=result.chunk_count,
+        document_ids=result.document_ids,
+    )
+
+
+@router.post("/rechunk", response_model=KnowledgeRebuildResult)
+def rechunk_knowledge_documents(
+    payload: KnowledgeRebuildRequest,
+    _: AuthContext = Depends(require_roles("admin", "operator")),
+) -> KnowledgeRebuildResult:
+    """Re-parse + re-chunk + re-embed completed documents.
+
+    Distinct from ``/reindex``: that one keeps existing chunks and only
+    refreshes embeddings; this one regenerates the chunks themselves
+    against the original file in object storage. Use after the chunker
+    logic changes (e.g. table-aware chunking) so existing documents
+    pick up the new boundaries without a delete + re-upload cycle.
+    The ``stale_only`` flag is accepted for symmetry but ignored — the
+    rechunk operation is always full per scope.
+    """
+    try:
+        result = rechunk_knowledge_document(payload.document_id)
+    except ValueError as exc:
+        if payload.document_id:
+            raise NotFound(str(exc), error_code="DOCUMENT_NOT_FOUND") from exc
+        raise BadRequest(str(exc), error_code="INVALID_RECHUNK_REQUEST") from exc
+    except RuntimeError as exc:
+        raise UpstreamError(str(exc), error_code="RECHUNK_UPSTREAM_FAILED") from exc
 
     return KnowledgeRebuildResult(
         scope=result.scope,

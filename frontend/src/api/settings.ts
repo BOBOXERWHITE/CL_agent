@@ -1,11 +1,15 @@
 import { postJson, requestJson } from "./client";
 
+export type AgentRouterProvider = "llm" | "embedding" | "keyword";
+
 export interface EditableSystemSettings {
   default_tenant_id: string;
   default_customer_id: string;
   chat_top_k: number;
   chat_confidence_threshold: number;
   default_eval_dataset: string;
+  agent_router_provider: AgentRouterProvider;
+  chat_history_max_turns: number;
 }
 
 export interface RuntimeSystemSettings {

@@ -183,7 +183,7 @@ class OpenAICompatibleRewriteClient:
         user = f"Question: {question}\n\nReturn {n} paraphrases as a JSON array."
         try:
             content = await self._chat_async(
-                _PARAPHRASE_SYSTEM_PROMPT, user, temperature=0.7, async_client=async_client
+                _PARAPHRASE_SYSTEM_PROMPT, user, temperature=0.2, async_client=async_client
             )
         except (httpx.HTTPError, KeyError, IndexError, ValueError) as exc:
             _log.warning("rewrite_paraphrase_upstream_failed", extra={"error": str(exc)})
@@ -211,7 +211,7 @@ class OpenAICompatibleRewriteClient:
     ) -> str:
         try:
             return await self._chat_async(
-                _HYDE_SYSTEM_PROMPT, question, temperature=0.5, async_client=async_client
+                _HYDE_SYSTEM_PROMPT, question, temperature=0.0, async_client=async_client
             )
         except (httpx.HTTPError, KeyError, IndexError, ValueError) as exc:
             _log.warning("rewrite_hyde_upstream_failed", extra={"error": str(exc)})
@@ -223,7 +223,7 @@ class OpenAICompatibleRewriteClient:
             return []
         user = f"Question: {question}\n\nReturn {n} paraphrases as a JSON array."
         try:
-            content = self._chat(_PARAPHRASE_SYSTEM_PROMPT, user, temperature=0.7)
+            content = self._chat(_PARAPHRASE_SYSTEM_PROMPT, user, temperature=0.2)
         except (httpx.HTTPError, KeyError, IndexError, ValueError) as exc:
             _log.warning("rewrite_paraphrase_upstream_failed", extra={"error": str(exc)})
             return []
@@ -246,7 +246,7 @@ class OpenAICompatibleRewriteClient:
 
     def generate_hyde_document(self, question: str) -> str:
         try:
-            return self._chat(_HYDE_SYSTEM_PROMPT, question, temperature=0.5)
+            return self._chat(_HYDE_SYSTEM_PROMPT, question, temperature=0.0)
         except (httpx.HTTPError, KeyError, IndexError, ValueError) as exc:
             _log.warning("rewrite_hyde_upstream_failed", extra={"error": str(exc)})
             return ""

@@ -18,7 +18,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from app.core.observability import tracing
 from app.db.base import Base
-from app.db.models.agent import AgentRun
+from app.db.models.agent import AgentRun, AgentThread
 from app.services.agents.engine import EventType, TimelineEvent
 from app.services.agents.event_sink import persist_agent_events
 
@@ -93,8 +93,19 @@ def test_persist_agent_events_opens_named_span(session: Session, span_log_captur
     span carrying ``agent_run_id`` + ``event_count``."""
     run_id = str(uuid4())
     session.add(
+        AgentThread(
+            id=run_id,
+            tenant_id="t1",
+            customer_id="c1",
+            domain="policy",
+            specialist="policy_supervisor_agent",
+            status="active",
+        )
+    )
+    session.add(
         AgentRun(
             id=run_id,
+            thread_id=run_id,
             tenant_id="t1",
             customer_id="c1",
             agent_name="x",

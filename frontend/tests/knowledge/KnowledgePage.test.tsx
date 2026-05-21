@@ -8,6 +8,7 @@ vi.mock("../../src/api/knowledge", () => ({
   listKnowledgeJobs: vi.fn(),
   uploadKnowledgeDocument: vi.fn(),
   rebuildKnowledgeIndex: vi.fn(),
+  rechunkKnowledgeDocuments: vi.fn(),
   deleteKnowledgeDocument: vi.fn(),
   checkKnowledgeEmbeddingReadiness: vi.fn(),
   runKnowledgeEmbeddingSmokeTest: vi.fn(),
@@ -332,4 +333,82 @@ test("deletes a document and refreshes the job list", async () => {
   });
 
   expect(knowledgeApi.deleteKnowledgeDocument).toHaveBeenCalledWith("doc-1");
+});
+
+test("rechunks all completed documents from the header button", async () => {
+  vi.mocked(knowledgeApi.listKnowledgeJobs).mockResolvedValue([
+    {
+      job_id: "job-1",
+      document_id: "doc-1",
+      filename: "policy.docx",
+      status: "completed",
+      chunk_count: 2,
+      tenant_id: "t1",
+      customer_id: "c1",
+      created_at: "2026-04-01T00:00:00Z",
+      updated_at: "2026-04-01T00:00:00Z",
+    },
+  ]);
+  vi.mocked(knowledgeApi.rechunkKnowledgeDocuments).mockResolvedValue({
+    scope: "all",
+    document_count: 1,
+    chunk_count: 5,
+    document_ids: ["doc-1"],
+  });
+
+  render(<KnowledgePage />);
+
+  await waitFor(() => {
+    expect(screen.getByText("policy.docx")).toBeInTheDocument();
+  });
+
+  fireEvent.click(screen.getByRole("button", { name: "重新切块（全部）" }));
+
+  await waitFor(() => {
+    expect(
+      screen.getByText("已完成 1 份文档、5 个分块的重切块。"),
+    ).toBeInTheDocument();
+  });
+
+  expect(knowledgeApi.rechunkKnowledgeDocuments).toHaveBeenCalledWith({});
+});
+
+test("rechunks a single document from its row action", async () => {
+  vi.mocked(knowledgeApi.listKnowledgeJobs).mockResolvedValue([
+    {
+      job_id: "job-1",
+      document_id: "doc-1",
+      filename: "policy.docx",
+      status: "completed",
+      chunk_count: 2,
+      tenant_id: "t1",
+      customer_id: "c1",
+      created_at: "2026-04-01T00:00:00Z",
+      updated_at: "2026-04-01T00:00:00Z",
+    },
+  ]);
+  vi.mocked(knowledgeApi.rechunkKnowledgeDocuments).mockResolvedValue({
+    scope: "document",
+    document_count: 1,
+    chunk_count: 4,
+    document_ids: ["doc-1"],
+  });
+
+  render(<KnowledgePage />);
+
+  await waitFor(() => {
+    expect(screen.getByText("policy.docx")).toBeInTheDocument();
+  });
+
+  fireEvent.click(screen.getByRole("button", { name: "重新切块" }));
+
+  await waitFor(() => {
+    expect(
+      screen.getByText("已完成 policy.docx 的重切块，共 4 个新分块。"),
+    ).toBeInTheDocument();
+  });
+
+  expect(knowledgeApi.rechunkKnowledgeDocuments).toHaveBeenCalledWith({
+    documentId: "doc-1",
+  });
 });

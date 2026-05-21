@@ -45,6 +45,7 @@ async def test_agents_run_round_trip_async(asgi_app) -> None:
     assert resp.status_code == 201, resp.text
     body = resp.json()
     assert body["id"]
+    assert body["thread_id"]
     assert body["agent_name"]
     assert "timeline" in body
 

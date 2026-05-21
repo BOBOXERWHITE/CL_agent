@@ -63,3 +63,6 @@ class AgentExecutionResult:
     # produced. The route treats the list as the source of truth for
     # structured event replay; ``timeline`` stays as the legacy display view.
     engine_events: list[TimelineEvent] = field(default_factory=list)
+    interrupt: dict[str, Any] | None = None
+    checkpoint_payload: dict[str, Any] = field(default_factory=dict)
+    checkpoint_type: str | None = None

@@ -224,3 +224,65 @@ async def test_stream_chat_token_by_token_via_pushdown(
     # punts to an empty final message.
     combined = "".join(d.get("text", "") for d in deltas)
     assert combined.strip()
+
+
+async def test_stream_chat_persists_storage_safe_retrieval_mode(asgi_app, monkeypatch) -> None:
+    """Streaming persistence must normalize long retrieval modes before DB write."""
+    from app.api.routes import chat as chat_route
+    from app.db.models.rag_recall_log import RagRecallLog
+    from app.db.session import SessionLocal
+    from app.services.rag.query_engine import PolicyAnswerResult, RetrievalTrace
+
+    long_mode = "multi_hybrid+crag:14571ms/30349ms"
+
+    async def _fake_prepare(
+        *, question: str, tenant_id: str, customer_id: str
+    ) -> PolicyAnswerResult:
+        return PolicyAnswerResult(
+            answer=f"stream answer for {question}",
+            confidence=0.88,
+            citations=[],
+            retrieval_trace=RetrievalTrace(
+                mode=long_mode,
+                prompt_name="test-prompt",
+                prompt_version=1,
+                model_name="test-model",
+                token_usage={"input_tokens": 10, "output_tokens": 20},
+                selected_chunks=[],
+                original_query=question,
+                expanded_query=question,
+                rewrite_rules=[],
+                candidate_count=0,
+            ),
+            prompt_template_id=None,
+        )
+
+    monkeypatch.setattr(chat_route, "prepare_answer_context_async", _fake_prepare)
+
+    transport = httpx.ASGITransport(app=asgi_app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+        async with client.stream(
+            "POST",
+            "/api/chat/ask/stream",
+            headers={"Authorization": "Bearer admin-token"},
+            json={
+                "question": "test question",
+                "tenant_id": "t1",
+                "customer_id": "c1",
+            },
+        ) as resp:
+            assert resp.status_code == 200
+            events = await _collect_events(resp)
+
+    citations_event = next(e for e in events if e.get("event") == "citations")
+    done_event = next(e for e in events if e.get("event") == "done")
+    assert citations_event["retrieval_mode"] == long_mode
+
+    with SessionLocal() as session:
+        recall = (
+            session.query(RagRecallLog)
+            .filter(RagRecallLog.session_id == done_event["session_id"])
+            .one()
+        )
+        assert recall.retrieval_mode == "multi_hybrid+crag"
+        assert len(recall.retrieval_mode) <= 32

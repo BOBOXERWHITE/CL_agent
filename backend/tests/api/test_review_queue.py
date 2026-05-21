@@ -48,3 +48,23 @@ def test_blocked_agent_run_is_written_to_review_queue(client) -> None:
     assert queue_payload["items"]
     assert queue_payload["items"][0]["source"] == "agent"
     assert queue_payload["items"][0]["rule_result"]["decision"] == "blocked"
+    assert queue_payload["items"][0]["agent_run_id"] == payload["id"]
+    assert queue_payload["items"][0]["thread_id"] == payload["thread_id"]
+    assert queue_payload["items"][0]["pending_interrupt"]["queue_name"] == "finance-review"
+    assert (
+        queue_payload["items"][0]["latest_checkpoint"]["checkpoint_type"] == "engine_adapter_state"
+    )
+    assert queue_payload["items"][0]["latest_checkpoint"]["status"] == "paused"
+    trace_events = queue_payload["items"][0]["trace_events"]
+    assert any(
+        event["category"] == "interrupt"
+        and event["name"] == "human_review"
+        and event["metadata"]["queue_name"] == "finance-review"
+        for event in trace_events
+    )
+    assert any(
+        event["category"] == "review"
+        and event["name"] == "review_case"
+        and event["status"] == "open"
+        for event in trace_events
+    )
