@@ -3,10 +3,11 @@ from __future__ import annotations
 from collections.abc import Iterable
 from datetime import UTC, datetime
 from statistics import fmean
-from typing import Any, TypedDict
+from typing import Annotated, Any, TypedDict
 from uuid import uuid4
 
 from langgraph.graph import END, START, StateGraph
+from langgraph.types import Send
 
 from app.core.config import get_settings
 from app.db.models.agent import AgentRun, AgentThread, AgentThreadCheckpoint
@@ -26,6 +27,26 @@ from app.services.agents.policy_profiles import (
 )
 from app.services.agents.state import AgentExecutionResult, TimelineStep, ToolCallRecord
 from app.services.agents.tool_gateway import run_guarded_tool
+
+
+def _merge_parallel_reports(
+    existing: dict[str, dict[str, Any]] | None,
+    new: dict[str, dict[str, Any]] | None,
+) -> dict[str, dict[str, Any]]:
+    """Reducer for the parallel-fan-out accumulator field.
+
+    Each ``mixed_profile_worker`` invocation writes
+    ``{profile.domain: {report, tool_calls, guardrail_events, engine_events}}``
+    into ``parallel_profile_reports``. LangGraph runs the workers in
+    parallel via ``Send`` and calls this reducer to merge their writes
+    into a single dict keyed by domain. The reducer is associative +
+    commutative so worker arrival order does not affect the final state.
+    """
+    base: dict[str, dict[str, Any]] = dict(existing or {})
+    if new:
+        for domain, bundle in new.items():
+            base[domain] = bundle
+    return base
 
 
 class PolicySupervisorState(TypedDict, total=False):
@@ -56,6 +77,12 @@ class PolicySupervisorState(TypedDict, total=False):
     interrupt: dict[str, Any] | None
     profile_reports: list[dict[str, Any]]
     final_result: dict[str, Any]
+    # P7 Phase A: accumulator for parallel-fan-out worker outputs.
+    # Annotated with a custom reducer so multiple Send branches can
+    # write concurrently without LangGraph raising InvalidUpdateError.
+    # The ``mixed_reducer`` node consumes this and writes the same
+    # shape into the canonical state fields (profile_reports, etc.).
+    parallel_profile_reports: Annotated[dict[str, dict[str, Any]], _merge_parallel_reports]
 
 
 def _next_sequence(events: list[TimelineEvent]) -> int:
@@ -837,14 +864,228 @@ def _finalize_supervisor_node(state: PolicySupervisorState) -> PolicySupervisorS
     return {"final_result": final_result, "engine_events": engine_events}
 
 
+# ---------------------------------------------------------------------------
+# P7 Phase A — parallel mixed-domain (Orchestrator-Worker via LangGraph Send)
+# ---------------------------------------------------------------------------
+
+
+class _ParallelWorkerInput(TypedDict):
+    profile_domain: str
+    thread_id: str
+    question: str
+    tenant_id: str
+    customer_id: str
+
+
+def _mixed_fan_out_router(state: PolicySupervisorState) -> list[Send]:
+    """Fan out: emit one ``Send`` per planned profile so LangGraph runs
+    them in parallel via the Pregel runtime.
+
+    Each Send carries only the worker's own input — workers see a tiny
+    private state, not the full ``PolicySupervisorState``. Their outputs
+    land in ``parallel_profile_reports`` (annotated reducer above) and
+    are aggregated by ``_mixed_reducer_node``.
+    """
+    profiles = _planned_profiles(state)
+    base_input: _ParallelWorkerInput = {
+        "profile_domain": "",
+        "thread_id": state["thread_id"],
+        "question": state["question"],
+        "tenant_id": state["tenant_id"],
+        "customer_id": state["customer_id"],
+    }
+    return [
+        Send(
+            "mixed_profile_worker",
+            {**base_input, "profile_domain": profile.domain},
+        )
+        for profile in profiles
+    ]
+
+
+def _mixed_profile_worker_node(payload: _ParallelWorkerInput) -> PolicySupervisorState:
+    """Run :func:`_build_profile_report` for one profile.
+
+    LangGraph invokes this once per ``Send`` returned by the fan-out
+    router. Concurrent invocations are safe because the worker is a
+    pure function over its private ``payload`` — no shared mutable
+    state. Each worker writes a single key into the
+    ``parallel_profile_reports`` accumulator which the reducer node
+    consolidates after the Pregel barrier.
+    """
+    profile = get_policy_profile(payload["profile_domain"])
+    if profile is None:
+        # Unknown domain — emit nothing; reducer will see an empty bundle
+        # and skip it gracefully.
+        return {"parallel_profile_reports": {}}
+    report, tool_calls, guardrail_events, engine_events = _build_profile_report(
+        profile,
+        thread_id=payload["thread_id"],
+        question=payload["question"],
+        tenant_id=payload["tenant_id"],
+        customer_id=payload["customer_id"],
+        starting_events=[],
+        starting_guardrails=[],
+    )
+    return {
+        "parallel_profile_reports": {
+            payload["profile_domain"]: {
+                "report": report,
+                "tool_calls": tool_calls,
+                "guardrail_events": guardrail_events,
+                "engine_events": engine_events,
+            }
+        }
+    }
+
+
+def _mixed_reducer_node(state: PolicySupervisorState) -> PolicySupervisorState:
+    """Aggregate parallel-worker outputs into the same shape that
+    :func:`_mixed_execute_node` produces in serial mode.
+
+    The output contract MUST match serial mode bit-for-bit: same
+    ``profile_reports`` ordering (by ``_planned_profiles`` order, not
+    arrival order), same coverage / missing dimensions / interrupt
+    blocks. Flipping ``AGENT_MIXED_EXECUTION`` between serial and
+    parallel is a no-op for any downstream consumer.
+    """
+    reports_by_domain = state.get("parallel_profile_reports") or {}
+    planned_profiles_in_order = _planned_profiles(state)
+
+    profile_reports: list[dict[str, Any]] = []
+    tool_calls = list(state.get("tool_calls", []))
+    guardrail_events = list(state.get("guardrail_events", []))
+    engine_events = list(state.get("engine_events", []))
+    aggregate_subresults: list[dict[str, Any]] = []
+    aggregate_citations: list[dict[str, Any]] = []
+    per_domain: dict[str, Any] = {}
+    prefixed_required_dimensions: list[str] = []
+    prefixed_covered_dimensions: list[str] = []
+    missing_dimensions: list[str] = []
+
+    for profile in planned_profiles_in_order:
+        bundle = reports_by_domain.get(profile.domain)
+        if bundle is None:
+            continue
+        report = bundle["report"]
+        profile_reports.append(report)
+        tool_calls.extend(bundle.get("tool_calls", []))
+        guardrail_events.extend(bundle.get("guardrail_events", []))
+        for event in bundle.get("engine_events", []):
+            engine_events = _append_event(
+                engine_events,
+                event.event_type,
+                event.node_name,
+                dict(event.payload),
+            )
+        per_domain[profile.domain] = report["coverage"]
+        prefixed_required_dimensions.extend(
+            f"{profile.domain}.{dimension}"
+            for dimension in report["coverage"]["required_dimensions"]
+        )
+        prefixed_covered_dimensions.extend(
+            f"{profile.domain}.{dimension}"
+            for dimension in report["coverage"]["covered_dimensions"]
+        )
+        missing_dimensions.extend(
+            f"{profile.domain}.{dimension}" for dimension in report["missing_dimensions"]
+        )
+        aggregate_subresults.extend(
+            {
+                **subresult,
+                "dimension": f"{profile.domain}.{subresult['dimension']}",
+            }
+            for subresult in report["subresults"]
+        )
+        aggregate_citations.extend(report["citations"])
+
+    overall_coverage_ratio = (
+        1.0
+        if not prefixed_required_dimensions
+        else round(
+            len(prefixed_covered_dimensions) / len(prefixed_required_dimensions),
+            4,
+        )
+    )
+    interrupt = (
+        {
+            "kind": "completeness_review",
+            "reason": "mixed-domain policy answer does not cover all required dimensions",
+            "missing_dimensions": missing_dimensions,
+            "allowed_decisions": ["approve", "edit", "reject"],
+        }
+        if missing_dimensions
+        else None
+    )
+
+    if interrupt is not None:
+        guardrail_events.append(
+            {
+                "decision": "interrupt",
+                "reason": interrupt["reason"],
+                "missing_dimensions": missing_dimensions,
+                "thread_id": state["thread_id"],
+                "profile": "mixed",
+            }
+        )
+        engine_events = _append_event(
+            engine_events,
+            EventType.PAUSE,
+            "mixed_domain_completeness_validator",
+            {
+                "reason": interrupt["reason"],
+                "missing_dimensions": missing_dimensions,
+                "domains": [report["domain"] for report in profile_reports],
+            },
+        )
+
+    return {
+        "facts": {report["domain"]: report["facts"] for report in profile_reports},
+        "required_dimensions": prefixed_required_dimensions,
+        "subquestions": [],
+        "subresults": aggregate_subresults,
+        "citations": _merge_citations([{"citations": aggregate_citations}]),
+        "coverage": {
+            "required_dimensions": prefixed_required_dimensions,
+            "covered_dimensions": prefixed_covered_dimensions,
+            "coverage_ratio": overall_coverage_ratio,
+            "per_domain": per_domain,
+        },
+        "missing_dimensions": missing_dimensions,
+        "guardrail_events": guardrail_events,
+        "engine_events": engine_events,
+        "tool_calls": tool_calls,
+        "interrupt": interrupt,
+        "profile_reports": profile_reports,
+    }
+
+
+def _mixed_orchestrator_passthrough(state: PolicySupervisorState) -> PolicySupervisorState:
+    """No-op node that owns the outgoing conditional edge to ``Send`` workers.
+
+    LangGraph requires the fan-out router to live on a conditional edge
+    OUT of a real node (the router itself is not a node). This node is
+    intentionally empty — it exists only to give the router an anchor.
+    """
+    return {}
+
+
 def _build_graph():
+    settings = get_settings()
+    parallel_mode = settings.agent_mixed_execution == "parallel"
+
     graph = StateGraph(PolicySupervisorState)
     graph.add_node("route_policy", _route_node)
     graph.add_node("extract_domain_facts", _profile_fact_node)
     graph.add_node("plan_domain_subquestions", _profile_plan_node)
     graph.add_node("execute_domain_subquestions", _profile_execute_node)
     graph.add_node("validate_domain_coverage", _profile_validate_node)
-    graph.add_node("mixed_execute_profiles", _mixed_execute_node)
+    if parallel_mode:
+        graph.add_node("mixed_orchestrator", _mixed_orchestrator_passthrough)
+        graph.add_node("mixed_profile_worker", _mixed_profile_worker_node)
+        graph.add_node("mixed_reducer", _mixed_reducer_node)
+    else:
+        graph.add_node("mixed_execute_profiles", _mixed_execute_node)
     graph.add_node("generic_policy_search", _generic_search_node)
     graph.add_node("finalize", _finalize_supervisor_node)
     graph.add_edge(START, "route_policy")
@@ -853,7 +1094,7 @@ def _build_graph():
         _route_after_policy,
         {
             "profiled": "extract_domain_facts",
-            "mixed": "mixed_execute_profiles",
+            "mixed": "mixed_orchestrator" if parallel_mode else "mixed_execute_profiles",
             "generic": "generic_policy_search",
         },
     )
@@ -861,7 +1102,20 @@ def _build_graph():
     graph.add_edge("plan_domain_subquestions", "execute_domain_subquestions")
     graph.add_edge("execute_domain_subquestions", "validate_domain_coverage")
     graph.add_edge("validate_domain_coverage", "finalize")
-    graph.add_edge("mixed_execute_profiles", "finalize")
+    if parallel_mode:
+        # Orchestrator fans out via Send → workers run in parallel →
+        # LangGraph's barrier waits for all workers before running the
+        # reducer (because reducer is the only outgoing edge target of
+        # mixed_profile_worker, the Pregel runtime treats it as a join).
+        graph.add_conditional_edges(
+            "mixed_orchestrator",
+            _mixed_fan_out_router,
+            ["mixed_profile_worker"],
+        )
+        graph.add_edge("mixed_profile_worker", "mixed_reducer")
+        graph.add_edge("mixed_reducer", "finalize")
+    else:
+        graph.add_edge("mixed_execute_profiles", "finalize")
     graph.add_edge("generic_policy_search", "finalize")
     graph.add_edge("finalize", END)
     return graph.compile()

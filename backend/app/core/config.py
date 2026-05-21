@@ -116,6 +116,20 @@ class Settings:
     # query path, and roll back the query path without touching the
     # schema.
     lexical_backend: str
+    # P7 Phase A: mixed-domain policy supervisor execution mode.
+    #   ``serial``   — legacy for-loop over planned profiles (default;
+    #                  used by every existing test fixture)
+    #   ``parallel`` — LangGraph ``Send`` fan-out: each profile runs
+    #                  in its own worker invocation, the reducer node
+    #                  waits for all workers to complete (barrier) and
+    #                  aggregates. Same input/output contract as serial.
+    #
+    # Industry-mainstream "Orchestrator-Worker" pattern (LinkedIn SQL
+    # agent / Klarna customer service / Uber Genie all use the same
+    # LangGraph Send shape). Off by default so existing tests + the
+    # docker-compose Milvus instance aren't hit with 3x concurrent
+    # tool calls until operators explicitly opt in.
+    agent_mixed_execution: str
     embedding_provider: str
     embedding_model_name: str
     embedding_api_base_url: str
@@ -269,6 +283,7 @@ def get_settings() -> Settings:
         milvus_bm25_enabled=_as_bool(os.getenv("MILVUS_BM25_ENABLED"), default=False),
         milvus_bm25_tokenizer=os.getenv("MILVUS_BM25_TOKENIZER", "jieba").strip().lower(),
         lexical_backend=os.getenv("LEXICAL_BACKEND", "ilike").strip().lower(),
+        agent_mixed_execution=os.getenv("AGENT_MIXED_EXECUTION", "serial").strip().lower(),
         embedding_provider=os.getenv("EMBEDDING_PROVIDER", "deterministic").lower(),
         embedding_model_name=os.getenv("EMBEDDING_MODEL_NAME", "deterministic-hash-embedding"),
         embedding_api_base_url=os.getenv(
