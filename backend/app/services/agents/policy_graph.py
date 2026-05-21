@@ -42,7 +42,9 @@ from app.services.agents.engine import (
     TimelineEvent,
 )
 from app.services.agents.nodes import append_timeline_step
+from app.services.agents.react_planner import PlanResponse, plan_next_action
 from app.services.agents.state import AgentExecutionResult, TimelineStep, ToolCallRecord
+from app.services.agents.tool_registry import get_default_registry
 from app.services.agents.tool_runner import (
     ToolInvocationStatus,
     ToolRunner,
@@ -52,31 +54,102 @@ from app.services.agents.tool_runner import (
 MAX_REACT_STEPS = 8  # one ReAct loop = plan+act+observe+plan+finalize (5);
 #                     allow headroom for up to 2 tool-call cycles.
 
+# P7 Phase B: only these tools may be selected by the LLM planner. The
+# legacy hardcoded plan only calls ``policy_search``; we expose the same
+# tool plus any others registered in the default registry so the LLM
+# has real choice, but we filter to "safe to invoke from a policy QA
+# agent" — order-mutation tools (e.g. cancel_booking) are deliberately
+# excluded even if registered, to keep blast radius bounded.
+_POLICY_REACT_ALLOWED_TOOLS = ("policy_search",)
+
 
 # ---------------------------------------------------------------------------
 # Nodes
 # ---------------------------------------------------------------------------
 
 
+def _allowed_tool_catalog() -> list[dict[str, str]]:
+    """Build the per-cycle tool catalog the planner shows to the LLM.
+
+    Pulls names + descriptions from the registry so the planner stays
+    in sync with whatever the tool layer publishes — no second source
+    of truth to maintain. Filters to ``_POLICY_REACT_ALLOWED_TOOLS`` so
+    new write-side tools don't accidentally become available to the
+    policy QA agent without an explicit allow-list edit.
+    """
+    registry = get_default_registry()
+    catalog: list[dict[str, str]] = []
+    for name in _POLICY_REACT_ALLOWED_TOOLS:
+        if not registry.has(name):
+            continue
+        tool = registry.get(name)
+        catalog.append({"name": tool.name, "description": tool.description})
+    return catalog
+
+
 def _plan_node(state: GraphState) -> NodeResult:
     """Decide whether to call a tool or finalize.
 
-    Deterministic policy: if we haven't yet observed any retrieval
-    result, call ``policy_search``. Once we have an observation, move on
-    to finalize. That's one ReAct cycle -- enough to prove the scaffold
-    works end-to-end while keeping tests deterministic without a real
-    LLM.
+    Two modes, picked by ``settings.agent_react_llm_enabled``:
+
+    - **Hardcoded** (default): if no observation yet → call
+      ``policy_search``; otherwise finalize. Zero LLM cost,
+      deterministic, identical to the pre-Phase-B behaviour.
+    - **LLM-driven** (P7 Phase B): delegate to
+      :func:`app.services.agents.react_planner.plan_next_action`. The
+      planner can choose any tool in the allow-list catalog OR
+      finalize. Failed LLM calls fall back to the hardcoded verdict
+      with ``fallback_used=True`` recorded in scratchpad so the
+      observability layer can count fallback rate.
+
+    The act-node + observe-node downstream are agnostic to which mode
+    produced the plan — the ``state.scratchpad["plan"]`` dict shape is
+    identical (``{"action": ..., "tool": ...}``).
     """
-    observations = state.scratchpad.get("observations", [])
-    if not observations:
-        plan = {"action": "call_tool", "tool": "policy_search"}
-        return NodeResult(
-            next_node="act",
-            state_delta={"scratchpad": {"plan": plan}},
-        )
+    settings = get_settings()
+    observations = list(state.scratchpad.get("observations", []))
+    thoughts = list(state.scratchpad.get("thoughts", []))
+    react_step = int(state.scratchpad.get("react_step", 0))
+
+    plan_verdict: PlanResponse = plan_next_action(
+        question=str(state.scratchpad.get("question", "")),
+        observations=observations,
+        thoughts=thoughts,
+        available_tools=_allowed_tool_catalog(),
+        max_steps=settings.agent_react_max_steps,
+        current_step=react_step,
+    )
+
+    if plan_verdict.action == "call_tool" and plan_verdict.tool:
+        plan_dict = {
+            "action": "call_tool",
+            "tool": plan_verdict.tool,
+            "tool_args": dict(plan_verdict.tool_args),
+            "thought": plan_verdict.thought,
+            "fallback_used": plan_verdict.fallback_used,
+        }
+        next_node = "act"
+    else:
+        plan_dict = {
+            "action": "finalize",
+            "thought": plan_verdict.thought,
+            "fallback_used": plan_verdict.fallback_used,
+        }
+        next_node = "finalize"
+
+    # Accumulate the new thought (if non-empty) so the next cycle's
+    # planner prompt carries the running ReAct trace.
+    new_thoughts = [*thoughts, plan_verdict.thought] if plan_verdict.thought else thoughts
+
     return NodeResult(
-        next_node="finalize",
-        state_delta={"scratchpad": {"plan": {"action": "finalize"}}},
+        next_node=next_node,
+        state_delta={
+            "scratchpad": {
+                "plan": plan_dict,
+                "thoughts": new_thoughts,
+                "react_step": react_step + 1,
+            }
+        },
     )
 
 

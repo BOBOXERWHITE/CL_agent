@@ -130,6 +130,23 @@ class Settings:
     # docker-compose Milvus instance aren't hit with 3x concurrent
     # tool calls until operators explicitly opt in.
     agent_mixed_execution: str
+    # P7 Phase B: LLM-driven ReAct planner inside policy_graph.
+    # When False (default), ``_plan_node`` uses the legacy hardcoded
+    # decision ("no observations → call policy_search; otherwise
+    # finalize"), which is fast + deterministic + costs zero LLM tokens.
+    # When True, the plan node asks the LLM at each step which tool to
+    # call (or whether to finalize), enabling multi-tool / multi-cycle
+    # ReAct as in the original Yao et al. 2022 paper. Any LLM error
+    # falls back to the hardcoded plan with ``fallback_used=True`` so
+    # one flaky call never crashes a question. Watch the eval gate's
+    # judge_cost_usd_total when flipping this on — multi-cycle ReAct
+    # can spend 3-5x more tokens per question.
+    agent_react_llm_enabled: bool
+    # Hard cap on ReAct cycles (plan + act + observe). Exists to bound
+    # cost + latency when the LLM cannot decide to finalize. Matches
+    # the constant pinned in ``policy_graph.MAX_REACT_STEPS`` so a
+    # single env-var change can lower / raise both budgets together.
+    agent_react_max_steps: int
     embedding_provider: str
     embedding_model_name: str
     embedding_api_base_url: str
@@ -284,6 +301,8 @@ def get_settings() -> Settings:
         milvus_bm25_tokenizer=os.getenv("MILVUS_BM25_TOKENIZER", "jieba").strip().lower(),
         lexical_backend=os.getenv("LEXICAL_BACKEND", "ilike").strip().lower(),
         agent_mixed_execution=os.getenv("AGENT_MIXED_EXECUTION", "serial").strip().lower(),
+        agent_react_llm_enabled=_as_bool(os.getenv("AGENT_REACT_LLM_ENABLED"), default=False),
+        agent_react_max_steps=int(os.getenv("AGENT_REACT_MAX_STEPS", "8")),
         embedding_provider=os.getenv("EMBEDDING_PROVIDER", "deterministic").lower(),
         embedding_model_name=os.getenv("EMBEDDING_MODEL_NAME", "deterministic-hash-embedding"),
         embedding_api_base_url=os.getenv(
