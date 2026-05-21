@@ -1306,6 +1306,42 @@ def execute_policy_supervisor(
     route_name: str,
     base_timeline: list[TimelineStep],
 ) -> AgentExecutionResult:
+    # P8: open the top-level agent span so every nested LangGraph node,
+    # tool call, and LLM invocation forms a single trace tree in Phoenix /
+    # LangSmith / Jaeger. The span auto-closes on return / exception.
+    from app.core.observability.agent_tracing import agent_span
+
+    with agent_span(
+        "policy_supervisor",
+        agent_name="policy_supervisor_agent",
+        question=question,
+        tenant_id=tenant_id,
+        customer_id=customer_id,
+        **{"thread.id": thread_id, "run.id": run_id, "route.name": route_name},
+    ):
+        return _execute_policy_supervisor_impl(
+            question=question,
+            tenant_id=tenant_id,
+            customer_id=customer_id,
+            thread_id=thread_id,
+            run_id=run_id,
+            user_id=user_id,
+            route_name=route_name,
+            base_timeline=base_timeline,
+        )
+
+
+def _execute_policy_supervisor_impl(
+    *,
+    question: str,
+    tenant_id: str,
+    customer_id: str,
+    thread_id: str,
+    run_id: str,
+    user_id: str,
+    route_name: str,
+    base_timeline: list[TimelineStep],
+) -> AgentExecutionResult:
     prior_summary = _read_prior_thread_summary(thread_id, tenant_id)
     initial_state: PolicySupervisorState = {
         "question": question,

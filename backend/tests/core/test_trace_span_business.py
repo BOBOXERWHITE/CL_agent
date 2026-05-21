@@ -53,10 +53,19 @@ def session() -> Iterator[Session]:
 
 
 @pytest.fixture()
-def span_log_capture():
+def span_log_capture(monkeypatch):
     """Capture every ``trace_span_closed`` DEBUG record. Yields a list
     that accumulates span-close events for the duration of the test.
+
+    P8: explicitly forces the no-op tracing path (patch
+    ``_get_tracer_if_ready`` to return None) so these tests stay
+    deterministic regardless of whether a sibling test in the same
+    pytest run has already initialised the real OTEL SDK. Without
+    this, the OTEL path takes over and no debug records are emitted.
     """
+    from app.core.observability import tracing as _tracing
+
+    monkeypatch.setattr(_tracing, "_get_tracer_if_ready", lambda: None)
     records: list[logging.LogRecord] = []
 
     class _Capture(logging.Handler):

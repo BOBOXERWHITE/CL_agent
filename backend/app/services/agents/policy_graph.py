@@ -32,6 +32,11 @@ from __future__ import annotations
 from typing import Any
 
 from app.core.config import get_settings
+from app.core.observability.agent_tracing import (
+    agent_span,
+    react_step_span,
+    tool_span,
+)
 from app.services.agents.engine import (
     EventType,
     Graph,
@@ -147,6 +152,18 @@ def _plan_node(state: GraphState) -> NodeResult:
         }
         next_node = "finalize"
 
+    # P8: emit a tracing event for this ReAct cycle so dashboards can
+    # see plan/act/observe rhythm. Span is open-and-close (no body) —
+    # the surrounding agent_span is the real parent of act/observe.
+    with react_step_span(
+        step=react_step,
+        plan_action=plan_dict["action"],
+        plan_tool=plan_dict.get("tool"),
+        fallback_used=plan_dict.get("fallback_used", False),
+        **{"react.thought": plan_verdict.thought[:240]},
+    ):
+        pass
+
     # Accumulate the new thought (if non-empty) so the next cycle's
     # planner prompt carries the running ReAct trace.
     new_thoughts = [*thoughts, plan_verdict.thought] if plan_verdict.thought else thoughts
@@ -183,7 +200,13 @@ def _act_node(state: GraphState) -> NodeResult:
         "tenant_id": state.tenant_id,
         "customer_id": state.scratchpad.get("customer_id", ""),
     }
-    result = runner.run(tool_name, raw_input)
+    # P8: tool_span sits ABOVE the tool runner so retry / circuit breaker
+    # internals are visible as nested events while still being grouped
+    # under one logical tool-call span in the trace UI.
+    with tool_span(tool_name=tool_name, tool_input=raw_input) as span:
+        result = runner.run(tool_name, raw_input)
+        span.set_attr("tool.status", result.status.value)
+        span.set_attr("tool.latency_ms", result.latency_ms)
 
     tool_call_record = {
         "tool_name": tool_name,
@@ -398,6 +421,34 @@ def _run_result_to_execution(
 
 
 def execute_policy_graph(
+    *,
+    question: str,
+    tenant_id: str,
+    customer_id: str,
+    route_name: str,
+    base_timeline: list[TimelineStep],
+) -> AgentExecutionResult:
+    # P8: top-level agent span. Wraps the entire ReAct loop so plan_node /
+    # act_node / tool calls / LLM calls all roll up to this span in
+    # Phoenix / LangSmith / Jaeger.
+    with agent_span(
+        "policy_graph",
+        agent_name="travel_policy_agent",
+        question=question,
+        tenant_id=tenant_id,
+        customer_id=customer_id,
+        **{"route.name": route_name},
+    ):
+        return _execute_policy_graph_impl(
+            question=question,
+            tenant_id=tenant_id,
+            customer_id=customer_id,
+            route_name=route_name,
+            base_timeline=base_timeline,
+        )
+
+
+def _execute_policy_graph_impl(
     *,
     question: str,
     tenant_id: str,

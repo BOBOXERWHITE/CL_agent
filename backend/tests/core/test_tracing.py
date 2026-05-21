@@ -96,11 +96,19 @@ def test_trace_span_survives_exception_in_body() -> None:
 
 
 def test_init_otel_tracer_is_noop_when_endpoint_missing(monkeypatch: pytest.MonkeyPatch) -> None:
-    """No ``OTEL_EXPORTER_OTLP_ENDPOINT`` = tracer stays no-op, no crash."""
+    """No ``OTEL_EXPORTER_OTLP_ENDPOINT`` = tracer stays no-op, no crash.
+
+    P8: pre-existing tests may have already initialised the global OTEL
+    SDK (set_tracer_provider is one-shot for the process). Reset the
+    module-level ``_OTEL_READY`` flag for the duration of this test so
+    the cold-start assertion is testable in any test order.
+    """
     monkeypatch.delenv("OTEL_EXPORTER_OTLP_ENDPOINT", raising=False)
     from app.core.config import get_settings
 
     get_settings.cache_clear()
+    monkeypatch.setattr(tracing, "_OTEL_READY", False)
+    monkeypatch.setattr(tracing, "_OTEL_TRACER", None)
     assert tracing.init_otel_tracer() is False
     # Subsequent trace_span still works.
     with tracing.trace_span("still-works") as span:

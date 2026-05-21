@@ -27,6 +27,7 @@ from dataclasses import dataclass
 import httpx
 
 from app.core.config import get_settings
+from app.core.observability.agent_tracing import llm_span
 
 _log = logging.getLogger(__name__)
 
@@ -236,38 +237,55 @@ def judge_answer(
         citations=citations,
     )
 
-    try:
-        response = client.post(
-            f"{settings.llm_api_base_url.rstrip('/')}/chat/completions",
-            headers={
-                "Authorization": f"Bearer {settings.llm_api_key}",
-                "Content-Type": "application/json",
-            },
-            json={
-                "model": model_name,
-                "temperature": 0.0,
-                "messages": [
-                    {"role": "system", "content": _JUDGE_SYSTEM_PROMPT},
-                    {"role": "user", "content": user_prompt},
-                ],
-            },
-        )
-        response.raise_for_status()
-        payload = response.json()
-        content = str(payload["choices"][0]["message"]["content"])
-    except (
-        httpx.HTTPError,
-        KeyError,
-        IndexError,
-        TypeError,
-        ValueError,
-    ) as exc:
-        _log.warning("LLM judge HTTP/parse error: %s", exc, exc_info=False)
-        return _keyword_fallback_verdict(
-            keyword_fallback_match=keyword_fallback_match,
-            has_citations=has_citations,
-            reason=f"LLM judge call failed: {type(exc).__name__}",
-        )
+    # P8: judge LLM calls get their own span so eval cost is separable
+    # from inference cost in dashboards. ``purpose="eval_judge"`` keeps
+    # them out of the "answer" cost aggregate.
+    with llm_span(
+        purpose="eval_judge",
+        model_name=model_name,
+        provider=settings.llm_provider,
+    ) as span:
+        try:
+            response = client.post(
+                f"{settings.llm_api_base_url.rstrip('/')}/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {settings.llm_api_key}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "model": model_name,
+                    "temperature": 0.0,
+                    "messages": [
+                        {"role": "system", "content": _JUDGE_SYSTEM_PROMPT},
+                        {"role": "user", "content": user_prompt},
+                    ],
+                },
+            )
+            response.raise_for_status()
+            payload = response.json()
+            content = str(payload["choices"][0]["message"]["content"])
+            usage = payload.get("usage") or {}
+            if usage:
+                span.set_attr("llm.token_count.prompt", int(usage.get("prompt_tokens", 0)))
+                span.set_attr(
+                    "llm.token_count.completion",
+                    int(usage.get("completion_tokens", 0)),
+                )
+                span.set_attr("llm.token_count.total", int(usage.get("total_tokens", 0)))
+        except (
+            httpx.HTTPError,
+            KeyError,
+            IndexError,
+            TypeError,
+            ValueError,
+        ) as exc:
+            _log.warning("LLM judge HTTP/parse error: %s", exc, exc_info=False)
+            span.set_attr("llm.error", f"{type(exc).__name__}: {exc}")
+            return _keyword_fallback_verdict(
+                keyword_fallback_match=keyword_fallback_match,
+                has_citations=has_citations,
+                reason=f"LLM judge call failed: {type(exc).__name__}",
+            )
 
     parsed = _parse_judge_payload(content)
     if parsed is None:

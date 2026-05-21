@@ -34,25 +34,16 @@ from opentelemetry.sdk.trace.export.in_memory_span_exporter import (
 
 from app.core.observability import tracing
 
-# OTEL's ``set_tracer_provider`` is a one-shot: subsequent calls log a
-# warning and keep the original provider. So we init once (module
-# scope) and clear the exporter's buffer between tests.
-_SHARED_EXPORTER = InMemorySpanExporter()
-
-
-@pytest.fixture(scope="module", autouse=True)
-def _otel_module_setup():
-    """Init the OTEL SDK with our in-memory exporter once per module."""
-    tracing.init_otel_tracer(exporter=_SHARED_EXPORTER, force=True)
-    yield
-    tracing.shutdown_otel_tracer()
+# P8: the session-scoped OTEL setup + shared exporter live in
+# ``conftest.py`` so this module and ``test_agent_tracing.py`` cannot
+# race each other on OTEL's one-shot ``set_tracer_provider`` global.
 
 
 @pytest.fixture()
-def exporter() -> InMemorySpanExporter:
-    """Provide a clean exporter state to each test (buffer cleared)."""
-    _SHARED_EXPORTER.clear()
-    return _SHARED_EXPORTER
+def exporter(otel_exporter: InMemorySpanExporter) -> InMemorySpanExporter:
+    """Adapter for the legacy ``exporter`` fixture name used by tests
+    below — wraps the conftest-owned ``otel_exporter``."""
+    return otel_exporter
 
 
 def test_trace_span_reaches_exporter(exporter: InMemorySpanExporter) -> None:

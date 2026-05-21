@@ -37,6 +37,7 @@ from typing import Any, Literal
 import httpx
 
 from app.core.config import get_settings
+from app.core.observability.agent_tracing import llm_span
 
 _log = logging.getLogger(__name__)
 
@@ -236,35 +237,52 @@ def plan_next_action(
         current_step=current_step,
     )
 
-    try:
-        response = client.post(
-            f"{settings.llm_api_base_url.rstrip('/')}/chat/completions",
-            headers={
-                "Authorization": f"Bearer {settings.llm_api_key}",
-                "Content-Type": "application/json",
-            },
-            json={
-                "model": settings.llm_model_name,
-                "temperature": 0.0,
-                "response_format": {"type": "json_object"},
-                "messages": [
-                    {"role": "system", "content": _REACT_SYSTEM_PROMPT},
-                    {"role": "user", "content": user_prompt},
-                ],
-            },
-        )
-        response.raise_for_status()
-        payload = response.json()
-        content = str(payload["choices"][0]["message"]["content"])
-    except (
-        httpx.HTTPError,
-        KeyError,
-        IndexError,
-        TypeError,
-        ValueError,
-    ) as exc:
-        _log.warning("react_planner LLM call failed: %s", exc, exc_info=False)
-        return _hardcoded_fallback(observations, f"LLM call failed: {type(exc).__name__}")
+    # P8: emit an LLM span so Phoenix / LangSmith / Jaeger can plot the
+    # planner's per-cycle latency + token usage + cost separately from
+    # the surrounding agent / react_step spans.
+    with llm_span(
+        purpose="react_plan",
+        model_name=settings.llm_model_name,
+        provider=settings.llm_provider,
+        **{"llm.current_step": current_step},
+    ) as span:
+        try:
+            response = client.post(
+                f"{settings.llm_api_base_url.rstrip('/')}/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {settings.llm_api_key}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "model": settings.llm_model_name,
+                    "temperature": 0.0,
+                    "response_format": {"type": "json_object"},
+                    "messages": [
+                        {"role": "system", "content": _REACT_SYSTEM_PROMPT},
+                        {"role": "user", "content": user_prompt},
+                    ],
+                },
+            )
+            response.raise_for_status()
+            payload = response.json()
+            content = str(payload["choices"][0]["message"]["content"])
+            # Token + cost attribution lives on the span so dashboards
+            # can aggregate by purpose/agent/tenant without parsing logs.
+            usage = payload.get("usage") or {}
+            if usage:
+                span.set_attr("llm.token_count.prompt", int(usage.get("prompt_tokens", 0)))
+                span.set_attr("llm.token_count.completion", int(usage.get("completion_tokens", 0)))
+                span.set_attr("llm.token_count.total", int(usage.get("total_tokens", 0)))
+        except (
+            httpx.HTTPError,
+            KeyError,
+            IndexError,
+            TypeError,
+            ValueError,
+        ) as exc:
+            _log.warning("react_planner LLM call failed: %s", exc, exc_info=False)
+            span.set_attr("llm.error", f"{type(exc).__name__}: {exc}")
+            return _hardcoded_fallback(observations, f"LLM call failed: {type(exc).__name__}")
 
     parsed = _parse_llm_payload(content)
     if parsed is None:
