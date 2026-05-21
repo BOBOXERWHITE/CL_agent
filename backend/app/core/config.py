@@ -147,6 +147,17 @@ class Settings:
     # the constant pinned in ``policy_graph.MAX_REACT_STEPS`` so a
     # single env-var change can lower / raise both budgets together.
     agent_react_max_steps: int
+    # P7 Phase C: agent-as-tool registration. When True, a ``call_agent``
+    # Tool gets registered (lets one agent invoke another mid-execution)
+    # and is added to the ReAct planner's allow-list. Off by default
+    # because it widens blast radius — a buggy policy agent could trigger
+    # a ticket re-route loop. Combined with ``agent_as_tool_max_depth``
+    # (default 3) the recursion guard caps total LLM cost per question.
+    agent_as_tool_enabled: bool
+    # Maximum nested ``call_agent`` depth per request. The 4th call (after
+    # 3 nested invocations) returns a failed CallAgentOutput instead of
+    # recursing further, so an agent loop costs at most 3 * per-agent cost.
+    agent_as_tool_max_depth: int
     embedding_provider: str
     embedding_model_name: str
     embedding_api_base_url: str
@@ -303,6 +314,8 @@ def get_settings() -> Settings:
         agent_mixed_execution=os.getenv("AGENT_MIXED_EXECUTION", "serial").strip().lower(),
         agent_react_llm_enabled=_as_bool(os.getenv("AGENT_REACT_LLM_ENABLED"), default=False),
         agent_react_max_steps=int(os.getenv("AGENT_REACT_MAX_STEPS", "8")),
+        agent_as_tool_enabled=_as_bool(os.getenv("AGENT_AS_TOOL_ENABLED"), default=False),
+        agent_as_tool_max_depth=int(os.getenv("AGENT_AS_TOOL_MAX_DEPTH", "3")),
         embedding_provider=os.getenv("EMBEDDING_PROVIDER", "deterministic").lower(),
         embedding_model_name=os.getenv("EMBEDDING_MODEL_NAME", "deterministic-hash-embedding"),
         embedding_api_base_url=os.getenv(

@@ -54,13 +54,17 @@ from app.services.agents.tool_runner import (
 MAX_REACT_STEPS = 8  # one ReAct loop = plan+act+observe+plan+finalize (5);
 #                     allow headroom for up to 2 tool-call cycles.
 
-# P7 Phase B: only these tools may be selected by the LLM planner. The
-# legacy hardcoded plan only calls ``policy_search``; we expose the same
-# tool plus any others registered in the default registry so the LLM
-# has real choice, but we filter to "safe to invoke from a policy QA
-# agent" — order-mutation tools (e.g. cancel_booking) are deliberately
-# excluded even if registered, to keep blast radius bounded.
+# P7 Phase B: base allow-list of tools the LLM planner may select.
+# The legacy hardcoded plan only calls ``policy_search``; this stays
+# the safe default. Write-side / order-mutation tools (e.g.
+# cancel_booking) are deliberately excluded even if registered, to
+# keep the policy QA agent's blast radius bounded.
 _POLICY_REACT_ALLOWED_TOOLS = ("policy_search",)
+# P7 Phase C: additional tools surfaced only when ``agent_as_tool_enabled``
+# is True. Gated separately so flipping AGENT_REACT_LLM_ENABLED alone
+# doesn't suddenly let the policy agent invoke ticket / anomaly agents
+# without an explicit opt-in.
+_POLICY_REACT_AGENT_AS_TOOLS = ("call_agent",)
 
 
 # ---------------------------------------------------------------------------
@@ -75,11 +79,17 @@ def _allowed_tool_catalog() -> list[dict[str, str]]:
     in sync with whatever the tool layer publishes — no second source
     of truth to maintain. Filters to ``_POLICY_REACT_ALLOWED_TOOLS`` so
     new write-side tools don't accidentally become available to the
-    policy QA agent without an explicit allow-list edit.
+    policy QA agent without an explicit allow-list edit; when
+    ``agent_as_tool_enabled`` is True, ``_POLICY_REACT_AGENT_AS_TOOLS``
+    is additionally surfaced (currently ``call_agent``).
     """
+    settings = get_settings()
+    allowed = list(_POLICY_REACT_ALLOWED_TOOLS)
+    if settings.agent_as_tool_enabled:
+        allowed.extend(_POLICY_REACT_AGENT_AS_TOOLS)
     registry = get_default_registry()
     catalog: list[dict[str, str]] = []
-    for name in _POLICY_REACT_ALLOWED_TOOLS:
+    for name in allowed:
         if not registry.has(name):
             continue
         tool = registry.get(name)

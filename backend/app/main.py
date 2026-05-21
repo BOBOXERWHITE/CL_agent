@@ -101,6 +101,20 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             "vector_store_preload_failed",
             extra={"error": str(exc)},
         )
+
+    # P7 Phase C: register the ``call_agent`` tool if the feature flag is
+    # on. Idempotent + flag-gated, so a fresh deployment with the flag
+    # off doesn't pay any startup cost and the tool registry stays free
+    # of medium-risk entries.
+    from app.services.agents.agent_as_tool import ensure_agent_as_tool_registration
+
+    try:
+        ensure_agent_as_tool_registration()
+    except Exception as exc:
+        _bootstrap_logger.warning(
+            "agent_as_tool_registration_failed",
+            extra={"error": str(exc)},
+        )
     yield
     # P4.1: close the shared async HTTP client so connections drain
     # cleanly on shutdown. Safe when the client was never created
