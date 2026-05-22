@@ -209,6 +209,109 @@ def _get_error_status() -> Any:
     return Status(StatusCode.ERROR)
 
 
+@dataclass(frozen=True)
+class ExporterSpec:
+    """One concrete OTEL exporter target derived from settings.
+
+    Resolved by :func:`_resolve_exporter_specs` and consumed by
+    :func:`init_otel_tracer`, which attaches one ``BatchSpanProcessor``
+    per spec. Frozen so the resolver's output can't be mutated between
+    resolution and tracer wiring (would change export targets silently).
+    """
+
+    label: str  # "phoenix" | "langsmith" | "custom"
+    endpoint: str
+    headers: dict[str, str]
+
+
+_KNOWN_TRACING_BACKENDS: frozenset[str] = frozenset(
+    {"auto", "phoenix", "langsmith", "both", "none"}
+)
+
+
+def _spec_phoenix(settings: Any) -> ExporterSpec | None:
+    if not settings.phoenix_endpoint:
+        return None
+    return ExporterSpec(
+        label="phoenix",
+        endpoint=settings.phoenix_endpoint,
+        # Self-hosted Phoenix has no auth by default. Operators who put
+        # it behind a reverse proxy / auth layer can fall back to the
+        # raw OTEL_EXPORTER_OTLP_ENDPOINT + headers escape hatch.
+        headers={},
+    )
+
+
+def _spec_langsmith(settings: Any) -> ExporterSpec | None:
+    """Build a LangSmith exporter spec from the convenience env vars.
+
+    The auto-derived endpoint + ``x-api-key`` + ``Langsmith-Project``
+    headers save the operator from memorising the exact URL path and
+    header names. Power users can override the URL via
+    ``LANGSMITH_ENDPOINT`` (default already points at api.smith.langchain.com).
+    """
+    if not settings.langsmith_api_key:
+        return None
+    headers: dict[str, str] = {"x-api-key": settings.langsmith_api_key}
+    if settings.langsmith_project:
+        headers["Langsmith-Project"] = settings.langsmith_project
+    return ExporterSpec(
+        label="langsmith",
+        endpoint=settings.langsmith_endpoint,
+        headers=headers,
+    )
+
+
+def _spec_custom(settings: Any) -> ExporterSpec | None:
+    """Legacy ``OTEL_EXPORTER_OTLP_ENDPOINT`` escape hatch — for Jaeger
+    / Tempo / Datadog / any other OTLP-HTTP backend that doesn't fit
+    the Phoenix/LangSmith convenience boxes."""
+    if not settings.otel_exporter_otlp_endpoint:
+        return None
+    return ExporterSpec(
+        label="custom",
+        endpoint=settings.otel_exporter_otlp_endpoint,
+        headers=_parse_otlp_headers(settings.otel_exporter_otlp_headers),
+    )
+
+
+def _resolve_exporter_specs(settings: Any) -> list[ExporterSpec]:
+    """Decide which OTEL exporters to attach based on the settings layer.
+
+    Pure function over ``Settings`` — no I/O, no globals. The decision
+    tree is documented in ``tests/core/test_tracing_backends.py``; see
+    that file's docstring for the per-mode behaviour.
+    """
+    backend = settings.tracing_backend
+    if backend not in _KNOWN_TRACING_BACKENDS:
+        _log.warning(
+            "unknown_tracing_backend",
+            extra={"value": backend, "fallback": "auto"},
+        )
+        backend = "auto"
+
+    if backend == "none":
+        return []
+    if backend == "phoenix":
+        spec = _spec_phoenix(settings)
+        return [spec] if spec is not None else []
+    if backend == "langsmith":
+        spec = _spec_langsmith(settings)
+        return [spec] if spec is not None else []
+    if backend == "both":
+        return [s for s in (_spec_phoenix(settings), _spec_langsmith(settings)) if s is not None]
+    # auto: include every configured target
+    return [
+        s
+        for s in (
+            _spec_phoenix(settings),
+            _spec_langsmith(settings),
+            _spec_custom(settings),
+        )
+        if s is not None
+    ]
+
+
 def init_otel_tracer(
     *,
     exporter: Any | None = None,
@@ -240,7 +343,12 @@ def init_otel_tracer(
         return True
 
     settings = get_settings()
-    if exporter is None and not settings.otel_exporter_otlp_endpoint:
+    # Resolve the active exporter list once, so the dispatch table that
+    # decides "no-op vs Phoenix vs LangSmith vs both" lives in one
+    # testable pure function instead of being scattered through this
+    # try/except block.
+    specs = [] if exporter is not None else _resolve_exporter_specs(settings)
+    if exporter is None and not specs:
         _log.info("otel_disabled_no_endpoint")
         return False
 
@@ -253,30 +361,32 @@ def init_otel_tracer(
             SimpleSpanProcessor,
         )
 
-        if exporter is None:
+        processors: list[Any] = []
+        if exporter is not None:
+            # Injected exporter (tests / IT): SimpleSpanProcessor flushes
+            # synchronously so InMemorySpanExporter assertions don't
+            # need a manual flush call.
+            processors.append(SimpleSpanProcessor(exporter))
+        else:
             from opentelemetry.exporter.otlp.proto.http.trace_exporter import (
                 OTLPSpanExporter,
             )
 
-            headers = _parse_otlp_headers(settings.otel_exporter_otlp_headers)
-            exporter = OTLPSpanExporter(
-                endpoint=settings.otel_exporter_otlp_endpoint,
-                headers=headers or None,
-            )
-            processor = BatchSpanProcessor(exporter)
-        else:
-            # Injected exporter (tests / IT): use SimpleSpanProcessor so
-            # spans are flushed synchronously — tests can assert on the
-            # in-memory buffer without a manual flush.
-            processor = SimpleSpanProcessor(exporter)
+            for spec in specs:
+                otlp = OTLPSpanExporter(
+                    endpoint=spec.endpoint,
+                    headers=spec.headers or None,
+                )
+                processors.append(BatchSpanProcessor(otlp))
     except ImportError as exc:
         _log.warning(
             "otel_libs_missing",
             extra={
                 "hint": (
-                    "OTEL_EXPORTER_OTLP_ENDPOINT set but opentelemetry libs "
-                    "are not installed. Install the ``.[otel]`` extra "
-                    "(``pip install -e .[otel]``) or unset the env var."
+                    "tracing target set (PHOENIX_ENDPOINT / LANGSMITH_API_KEY / "
+                    "OTEL_EXPORTER_OTLP_ENDPOINT) but opentelemetry libs are not "
+                    "installed. Install the ``.[otel]`` extra "
+                    "(``pip install -e .[otel]``) or unset the env vars."
                 ),
                 "error": str(exc),
             },
@@ -287,7 +397,8 @@ def init_otel_tracer(
         {"service.name": settings.otel_service_name, "deployment.environment": settings.app_env}
     )
     provider = TracerProvider(resource=resource)
-    provider.add_span_processor(processor)
+    for processor in processors:
+        provider.add_span_processor(processor)
     trace.set_tracer_provider(provider)
 
     _OTEL_TRACER = trace.get_tracer("app.core.observability")
@@ -295,8 +406,9 @@ def init_otel_tracer(
     _log.info(
         "otel_enabled",
         extra={
-            "endpoint": settings.otel_exporter_otlp_endpoint,
             "service": settings.otel_service_name,
+            "exporters": [s.label for s in specs] if exporter is None else ["injected"],
+            "endpoints": [s.endpoint for s in specs] if exporter is None else [],
         },
     )
     return True

@@ -235,6 +235,25 @@ class Settings:
     otel_service_name: str
     otel_exporter_otlp_endpoint: str
     otel_exporter_otlp_headers: str
+    # P8 follow-up: pluggable tracing backend selector. ``auto`` (default)
+    # derives the active backend from whichever convenience profile env
+    # is filled in:
+    #   - PHOENIX_ENDPOINT set  → export to Phoenix
+    #   - LANGSMITH_API_KEY set → export to LangSmith (auto-builds the
+    #     endpoint + x-api-key header, no need to remember the URL)
+    #   - both set              → dual-export (Phoenix for local /
+    #     LangSmith for team UI in same run)
+    #   - neither set + raw OTEL_EXPORTER_OTLP_ENDPOINT set → that wins
+    #     (vendor-neutral escape hatch for Jaeger / Tempo / Datadog)
+    # Explicit values (``phoenix`` / ``langsmith`` / ``both`` / ``none``)
+    # force the choice regardless of which env vars are populated — useful
+    # in CI where you want to suppress all export without touching other
+    # env vars.
+    tracing_backend: str
+    phoenix_endpoint: str
+    langsmith_api_key: str
+    langsmith_project: str
+    langsmith_endpoint: str
     # P5.5: task_run cleanup retention. 0 or negative disables the cron
     # so dev environments never have rows deleted automatically.
     task_run_retention_days: int
@@ -365,6 +384,14 @@ def get_settings() -> Settings:
         otel_service_name=os.getenv("OTEL_SERVICE_NAME", "travel-ops-copilot"),
         otel_exporter_otlp_endpoint=os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT", "").strip(),
         otel_exporter_otlp_headers=os.getenv("OTEL_EXPORTER_OTLP_HEADERS", "").strip(),
+        tracing_backend=os.getenv("TRACING_BACKEND", "auto").strip().lower(),
+        phoenix_endpoint=os.getenv("PHOENIX_ENDPOINT", "").strip(),
+        langsmith_api_key=os.getenv("LANGSMITH_API_KEY", "").strip(),
+        langsmith_project=os.getenv("LANGSMITH_PROJECT", "cl-agent").strip(),
+        langsmith_endpoint=os.getenv(
+            "LANGSMITH_ENDPOINT",
+            "https://api.smith.langchain.com/otel/v1/traces",
+        ).strip(),
         task_run_retention_days=int(os.getenv("TASK_RUN_RETENTION_DAYS") or "90"),
         eval_judge_enabled=_as_bool(os.getenv("EVAL_JUDGE_ENABLED"), default=False),
         eval_judge_model_name=os.getenv("EVAL_JUDGE_MODEL_NAME", "").strip(),
