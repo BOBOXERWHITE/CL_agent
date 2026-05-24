@@ -1,14 +1,84 @@
 from __future__ import annotations
 
 import json
+import logging
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from time import perf_counter
+from typing import Final
 
 import httpx
 
 from app.core.config import get_settings
 from app.services.rag.text_processing import extract_cjk_sequences
+
+_log = logging.getLogger(__name__)
+
+# Cap body size in the log line. 1 KB is enough to catch the upstream
+# JSON error envelope (rate-limit code, quota number, request_id) without
+# spamming logs when an LLM accidentally returns a 4 MB HTML error page.
+_UPSTREAM_BODY_LOG_CAP: Final = 1000
+
+
+def _raise_for_llm_status(response: httpx.Response, *, purpose: str) -> None:
+    """Like ``response.raise_for_status()`` but logs status + url + body
+    first so 4xx / 5xx upstream errors leave a trail beyond the bare
+    HTTP code.
+
+    Critical for diagnosing 429: rate-limit (RPM/TPM window, retry
+    works after a minute) vs quota exhaustion (won't recover without
+    topping up the account). Same body usually carries 401 vs 403
+    distinction (invalid key vs expired key vs disabled). Without this
+    helper the only signal at the FastAPI route boundary is "500
+    Internal Server Error" — operators waste time chasing the backend
+    when the real problem is upstream.
+
+    Sync version — for non-streaming responses where the body is
+    already buffered by ``response.json()`` / ``response.text``.
+    Streaming responses (``client.stream(...)``) must use the async
+    variant below, which calls ``await response.aread()`` first.
+    """
+    if response.is_success:
+        return
+    try:
+        body = response.text
+    except Exception:  # pragma: no cover - defensive
+        body = "<body unreadable>"
+    _log.error(
+        "llm_upstream_error",
+        extra={
+            "purpose": purpose,
+            "status": response.status_code,
+            "url": str(response.url),
+            "body": body[:_UPSTREAM_BODY_LOG_CAP],
+        },
+    )
+    response.raise_for_status()
+
+
+async def _araise_for_llm_status(response: httpx.Response, *, purpose: str) -> None:
+    """Async variant — handles streaming responses by reading the body
+    before logging. httpx buffers small error bodies even for
+    ``client.stream(...)`` responses, so ``await response.aread()`` is
+    cheap on 4xx / 5xx paths."""
+    if response.is_success:
+        return
+    body = "<body unreadable>"
+    try:
+        await response.aread()
+        body = response.text
+    except Exception:  # pragma: no cover - defensive
+        pass
+    _log.error(
+        "llm_upstream_error",
+        extra={
+            "purpose": purpose,
+            "status": response.status_code,
+            "url": str(response.url),
+            "body": body[:_UPSTREAM_BODY_LOG_CAP],
+        },
+    )
+    response.raise_for_status()
 
 
 @dataclass(frozen=True)
@@ -258,7 +328,7 @@ class OpenAICompatiblePolicyAnswerClient:
                 "messages": messages,
             },
         )
-        response.raise_for_status()
+        _raise_for_llm_status(response, purpose="answer_sync")
         payload = response.json()
         answer = str(payload["choices"][0]["message"]["content"]).strip()
         usage = payload.get("usage", {})
@@ -340,7 +410,7 @@ class OpenAICompatiblePolicyAnswerClient:
             },
             json=req_body,
         ) as response:
-            response.raise_for_status()
+            await _araise_for_llm_status(response, purpose="answer_stream")
             async for raw in response.aiter_lines():
                 line = raw.strip() if raw else ""
                 if not line or not line.startswith("data:"):
@@ -427,7 +497,7 @@ class OpenAICompatiblePolicyAnswerClient:
                 "messages": messages,
             },
         )
-        response.raise_for_status()
+        await _araise_for_llm_status(response, purpose="answer_async")
         payload = response.json()
         answer = str(payload["choices"][0]["message"]["content"]).strip()
         usage = payload.get("usage", {})
@@ -503,7 +573,7 @@ def _probe_chat_completion(
             ],
         },
     )
-    response.raise_for_status()
+    _raise_for_llm_status(response, purpose="smoke_test")
 
 
 def check_llm_readiness(
@@ -550,7 +620,7 @@ def check_llm_readiness(
             f"{resolved_base_url.rstrip('/')}/models",
             headers={"Authorization": f"Bearer {resolved_api_key}"},
         )
-        response.raise_for_status()
+        _raise_for_llm_status(response, purpose="readiness_check")
         payload = response.json()
         model_ids = [
             str(item.get("id"))

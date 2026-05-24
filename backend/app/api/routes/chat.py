@@ -5,7 +5,8 @@ import re
 from time import perf_counter
 from uuid import uuid4
 
-from fastapi import APIRouter, Depends, Request, Response
+import httpx
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
@@ -135,12 +136,51 @@ async def ask_policy_question(
     )
 
     started_at = perf_counter()
-    result = await answer_policy_question_async(
-        question=payload.question,
-        tenant_id=tenant_id,
-        customer_id=customer_id,
-        chat_history_messages=turns_to_messages(history_turns) or None,
-    )
+    try:
+        result = await answer_policy_question_async(
+            question=payload.question,
+            tenant_id=tenant_id,
+            customer_id=customer_id,
+            chat_history_messages=turns_to_messages(history_turns) or None,
+        )
+    except httpx.HTTPStatusError as exc:
+        # Upstream LLM (OpenAI-compatible gateway) returned 4xx / 5xx.
+        # Convert to HTTP 503 with the upstream status + body so ops can
+        # tell "rate limit" (29 / quota / RPM) apart from "key invalid"
+        # (401) without grepping backend logs. The bare 500 we used to
+        # raise here pointed everyone at the backend instead of the
+        # actual upstream problem.
+        upstream_status = exc.response.status_code if exc.response is not None else None
+        try:
+            upstream_body = exc.response.text[:500] if exc.response is not None else ""
+        except Exception:  # pragma: no cover - defensive
+            upstream_body = ""
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "error": "llm_upstream_error",
+                "upstream_status": upstream_status,
+                "upstream_body": upstream_body,
+                "hint": (
+                    "Check LLM provider quota / rate limit. "
+                    "429 with 'rate' in body = transient (retry in ~1 min); "
+                    "429 with 'quota' / 'overdue' = top up account; "
+                    "401 / 403 = API key invalid or revoked."
+                ),
+            },
+        ) from exc
+    except httpx.HTTPError as exc:
+        # Network-layer failure (timeout, connection refused, DNS) —
+        # upstream is reachable in *principle* but didn't respond. 504
+        # is the correct HTTP code for that.
+        raise HTTPException(
+            status_code=504,
+            detail={
+                "error": "llm_upstream_unreachable",
+                "exception_type": type(exc).__name__,
+                "message": str(exc),
+            },
+        ) from exc
     latency_ms = int((perf_counter() - started_at) * 1000)
     request.state.model_name = result.retrieval_trace.model_name
     request.state.token_usage = result.retrieval_trace.token_usage
