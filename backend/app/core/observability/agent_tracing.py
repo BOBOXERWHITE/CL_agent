@@ -227,6 +227,138 @@ def retriever_span(
 
 
 @contextlib.contextmanager
+def embedding_span(
+    *,
+    model_name: str,
+    provider: str = "openai-compatible",
+    text_count: int | None = None,
+    dimension: int | None = None,
+    **extra: Any,
+) -> Iterator[_SpanHandle]:
+    """Wrap an embedding API call.
+
+    ``text_count`` is the number of texts being embedded in this call
+    (1 for ``text_to_embedding``, N for ``texts_to_embeddings``).
+    ``dimension`` is the embedding vector dimension. Both are useful for
+    Phoenix dashboards that chart "embedding API throughput" or "batch
+    size distribution". Latency is captured automatically by OTEL.
+    """
+    attrs: dict[str, Any] = {
+        OPENINFERENCE_SPAN_KIND: SpanKind.EMBEDDING,
+        "embedding.model_name": model_name,
+        "embedding.provider": provider,
+    }
+    if text_count is not None:
+        attrs["embedding.text_count"] = text_count
+    if dimension is not None:
+        attrs["embedding.dimension"] = dimension
+    for k, v in extra.items():
+        attrs[k] = safe_attr_value(v)
+    with trace_span("embedding", **attrs) as span:
+        yield span
+
+
+# ---------------------------------------------------------------------------
+# Cost computation (Phoenix renders llm.cost.usd as a per-span badge)
+# ---------------------------------------------------------------------------
+
+# Per-1K-token prices in USD. Pinned here so cost computation works
+# offline (no Phoenix Settings round-trip required) and survives an OTEL
+# backend swap. Keep this list tight — when the model isn't here we
+# return 0.0 cost rather than guess, so an unknown model is visually
+# distinguishable in Phoenix from a $0.0000 known-cheap model.
+#
+# Sources (as of 2025-Q4 — verify when you change providers):
+#   qwen-flash / qwen3-flash    : DashScope pricing page
+#   qwen-plus                   : DashScope pricing page
+#   qwen-max                    : DashScope pricing page
+#   deepseek-v3-2 / deepseek-v3 : ARK pricing (Volces console)
+#   gpt-4o / gpt-4o-mini        : OpenAI pricing
+#   text-embedding-v4           : DashScope pricing
+_LLM_PRICE_PER_1K_USD: Final[dict[str, tuple[float, float]]] = {
+    # model_name                : (prompt_per_1k, completion_per_1k)
+    "qwen-flash": (0.000114, 0.000457),  # ~¥0.0008/0.0032 per 1K
+    "qwen3-flash": (0.000114, 0.000457),
+    "qwen3.6-flash": (0.000114, 0.000457),
+    "qwen-plus": (0.000571, 0.001714),
+    "qwen-max": (0.005714, 0.022857),
+    "deepseek-v3-2": (0.000286, 0.001143),
+    "deepseek-v3-2-251201": (0.000286, 0.001143),
+    "deepseek-v3": (0.000286, 0.001143),
+    "gpt-4o-mini": (0.000150, 0.000600),
+    "gpt-4o": (0.002500, 0.010000),
+    "claude-3-5-haiku": (0.000800, 0.004000),
+    "claude-3-5-sonnet": (0.003000, 0.015000),
+    # Embedding models — completion price is 0 by convention
+    "text-embedding-v4": (0.000071, 0.0),  # ~¥0.0005/1K
+    "text-embedding-3-small": (0.000020, 0.0),
+    "text-embedding-3-large": (0.000130, 0.0),
+}
+
+
+def set_llm_messages_attrs(
+    span: _SpanHandle,
+    *,
+    input_messages: list[dict[str, Any]] | None = None,
+    output_messages: list[dict[str, Any]] | None = None,
+    max_chars_per_message: int = 4000,
+) -> None:
+    """Attach OpenInference-spec'd message attrs to an in-flight LLM span.
+
+    Phoenix's "Messages" pane reads indexed attributes of the form
+    ``llm.input_messages.{i}.message.role`` /
+    ``llm.input_messages.{i}.message.content`` (same for ``output_messages``).
+    We truncate each message body to ``max_chars_per_message`` so a long
+    evidence-stuffed prompt doesn't blow up the OTLP payload size (the
+    Phoenix collector has a ~64KB-per-attribute soft cap and trimming
+    here avoids "value too long" warnings on the receiver side).
+
+    Each message dict should look like ``{"role": "user", "content": "..."}``;
+    missing ``role`` defaults to ``"user"`` and missing ``content`` to ``""``.
+    Pass ``None`` to skip a side (e.g. before the call only ``input_messages``
+    is known).
+    """
+
+    def _emit(prefix: str, messages: list[dict[str, Any]]) -> None:
+        for i, msg in enumerate(messages):
+            role = str(msg.get("role", "user"))
+            content = str(msg.get("content", ""))
+            if len(content) > max_chars_per_message:
+                # Mark the truncation so a reader knows why the message ends abruptly.
+                content = content[:max_chars_per_message] + "...[truncated]"
+            span.set_attr(f"{prefix}.{i}.message.role", role)
+            span.set_attr(f"{prefix}.{i}.message.content", content)
+
+    if input_messages:
+        _emit("llm.input_messages", input_messages)
+    if output_messages:
+        _emit("llm.output_messages", output_messages)
+
+
+def compute_llm_cost_usd(
+    *,
+    model_name: str,
+    prompt_tokens: int,
+    completion_tokens: int,
+) -> float:
+    """Best-effort per-call cost in USD using the pinned price table.
+
+    Returns ``0.0`` when the model is not in :data:`_LLM_PRICE_PER_1K_USD`
+    — better to surface "unknown model, please add to price table" by
+    showing a missing cost badge than to invent a number. Negative or
+    NaN token counts are coerced to 0 so a malformed upstream usage
+    block can't propagate phantom costs.
+    """
+    prices = _LLM_PRICE_PER_1K_USD.get(model_name)
+    if prices is None:
+        return 0.0
+    prompt_per_1k, completion_per_1k = prices
+    p = max(0, int(prompt_tokens or 0))
+    c = max(0, int(completion_tokens or 0))
+    return round((p / 1000.0) * prompt_per_1k + (c / 1000.0) * completion_per_1k, 6)
+
+
+@contextlib.contextmanager
 def react_step_span(
     *,
     step: int,
@@ -260,9 +392,12 @@ __all__ = [
     "OPENINFERENCE_SPAN_KIND",
     "SpanKind",
     "agent_span",
+    "compute_llm_cost_usd",
+    "embedding_span",
     "llm_span",
     "react_step_span",
     "retriever_span",
     "safe_attr_value",
+    "set_llm_messages_attrs",
     "tool_span",
 ]

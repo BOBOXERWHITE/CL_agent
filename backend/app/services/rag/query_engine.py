@@ -717,13 +717,40 @@ async def answer_policy_question_async(
         )
 
     # --- async hot path #2: answer generation ---
+    # P8.1: wrap with OpenInference-spec'd llm_span so Phoenix can render
+    # this as an "LLM" leaf with token + cost attribution, instead of an
+    # opaque generic span. Token counts use the OpenInference field names
+    # (`llm.token_count.prompt|completion|total`) so downstream dashboards
+    # (Arize Phoenix Settings → cost) auto-pick them up.
+    from app.core.observability.agent_tracing import (
+        compute_llm_cost_usd,
+        llm_span,
+        set_llm_messages_attrs,
+    )
+
     generation_started_at = perf_counter()
-    with trace_span(
-        "policy_qa.generate",
-        tenant_id=tenant_id,
-        model=client_model_name,
-        evidence_count=len(evidence_snippets),
+    with llm_span(
+        purpose="answer",
+        model_name=client_model_name,
+        provider=settings.llm_provider,
+        **{
+            "tenant.id": tenant_id,
+            "evidence.count": len(evidence_snippets),
+        },
     ) as gen_span:
+        # P8.1: emit input_messages BEFORE the call so the trace stays
+        # useful even when the upstream LLM errors out. We reconstruct
+        # the conversation as Phoenix's Messages tab expects:
+        # prior history (if any) + the current user question. The exact
+        # prompt template + evidence isn't replayed verbatim (would
+        # double the OTLP payload); the question + history is the
+        # actionable signal a human reader cares about.
+        _input_msgs: list[dict[str, str]] = [
+            {"role": str(m.get("role", "user")), "content": str(m.get("content", ""))}
+            for m in (chat_history_messages or [])
+        ]
+        _input_msgs.append({"role": "user", "content": question})
+        set_llm_messages_attrs(gen_span, input_messages=_input_msgs)
         answer_draft = await answer_client.generate_answer_async(
             question=question,
             evidence_snippets=evidence_snippets,
@@ -731,10 +758,29 @@ async def answer_policy_question_async(
             prompt_template=prompt_selection.template,
             history_messages=chat_history_messages,
         )
-        # Attach usage after the call so the OTLP backend can attribute
-        # tokens to this exact span (billing-grade trace view).
-        gen_span.set_attr("input_tokens", int(answer_draft.token_usage.get("input_tokens", 0)))
-        gen_span.set_attr("output_tokens", int(answer_draft.token_usage.get("output_tokens", 0)))
+        # Map AnswerDraft.token_usage → OpenInference token attrs.
+        # `total` is computed locally so Phoenix doesn't have to add prompt+completion itself.
+        _prompt_tokens = int(answer_draft.token_usage.get("input_tokens", 0))
+        _completion_tokens = int(answer_draft.token_usage.get("output_tokens", 0))
+        gen_span.set_attr("llm.token_count.prompt", _prompt_tokens)
+        gen_span.set_attr("llm.token_count.completion", _completion_tokens)
+        gen_span.set_attr("llm.token_count.total", _prompt_tokens + _completion_tokens)
+        # Attach USD cost via the pinned price table so the trace view is
+        # billing-grade even when Phoenix Settings isn't reachable.
+        gen_span.set_attr(
+            "llm.cost.usd",
+            compute_llm_cost_usd(
+                model_name=client_model_name,
+                prompt_tokens=_prompt_tokens,
+                completion_tokens=_completion_tokens,
+            ),
+        )
+        # P8.1: emit the assistant answer as output_messages so Phoenix's
+        # Messages tab shows the full request/response pair.
+        set_llm_messages_attrs(
+            gen_span,
+            output_messages=[{"role": "assistant", "content": answer_draft.answer}],
+        )
     generation_elapsed_ms = int((perf_counter() - generation_started_at) * 1000)
 
     if (
@@ -915,13 +961,53 @@ def answer_policy_question(question: str, tenant_id: str, customer_id: str) -> P
             prompt_template_id=prompt_selection.id,
         )
 
-    generation_started_at = perf_counter()
-    answer_draft = answer_client.generate_answer(
-        question=question,
-        evidence_snippets=evidence_snippets,
-        confidence=top_score,
-        prompt_template=prompt_selection.template,
+    # P8.1: same OpenInference llm_span wrapping as the async path so
+    # sync callers (Celery worker, eval runner, scripts) also produce
+    # billing-grade Phoenix spans with token + cost attribution.
+    from app.core.observability.agent_tracing import (
+        compute_llm_cost_usd,
+        llm_span,
+        set_llm_messages_attrs,
     )
+
+    generation_started_at = perf_counter()
+    with llm_span(
+        purpose="answer",
+        model_name=client_model_name,
+        provider=settings.llm_provider,
+        **{
+            "tenant.id": tenant_id,
+            "evidence.count": len(evidence_snippets),
+        },
+    ) as gen_span:
+        # P8.1: emit input_messages BEFORE the call (parity with async site).
+        # Sync path has no chat history threading — single user turn is the
+        # entire conversation seen by the model.
+        set_llm_messages_attrs(gen_span, input_messages=[{"role": "user", "content": question}])
+        answer_draft = answer_client.generate_answer(
+            question=question,
+            evidence_snippets=evidence_snippets,
+            confidence=top_score,
+            prompt_template=prompt_selection.template,
+        )
+        _prompt_tokens = int(answer_draft.token_usage.get("input_tokens", 0))
+        _completion_tokens = int(answer_draft.token_usage.get("output_tokens", 0))
+        gen_span.set_attr("llm.token_count.prompt", _prompt_tokens)
+        gen_span.set_attr("llm.token_count.completion", _completion_tokens)
+        gen_span.set_attr("llm.token_count.total", _prompt_tokens + _completion_tokens)
+        gen_span.set_attr(
+            "llm.cost.usd",
+            compute_llm_cost_usd(
+                model_name=client_model_name,
+                prompt_tokens=_prompt_tokens,
+                completion_tokens=_completion_tokens,
+            ),
+        )
+        # P8.1: emit assistant answer as output_messages (parity with async).
+        set_llm_messages_attrs(
+            gen_span,
+            output_messages=[{"role": "assistant", "content": answer_draft.answer}],
+        )
     generation_elapsed_ms = int((perf_counter() - generation_started_at) * 1000)
 
     # Write-through: only cache high-confidence answers so we don't pin

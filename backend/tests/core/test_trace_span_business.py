@@ -177,16 +177,26 @@ def test_trace_span_exception_in_body_still_emits_close(
 
 
 def test_query_engine_has_rewrite_and_generate_spans() -> None:
-    """Guard against accidental deletion of the ``policy_qa.*`` spans:
-    a grep proof that the module still references them by name.
+    """Guard against accidental deletion of the rewrite + generate spans.
+
+    P8.1: the answer-generation span was renamed from the generic
+    ``policy_qa.generate`` to the OpenInference-spec'd ``llm.answer``
+    (produced by ``llm_span(purpose="answer", ...)``). Phoenix /
+    LangSmith / Arize all key off the ``llm.*`` naming convention so
+    spans render with the right icon + cost panel. The rewrite span
+    keeps its ``policy_qa.rewrite`` name because it isn't a leaf LLM
+    call (it can be HyDE / paraphrase / no-op depending on settings).
     """
     import inspect
 
     from app.services.rag import query_engine
 
     source = inspect.getsource(query_engine)
-    assert 'trace_span(\n        "policy_qa.rewrite"' in source or '"policy_qa.rewrite"' in source
-    assert '"policy_qa.generate"' in source
+    assert '"policy_qa.rewrite"' in source
+    # The answer LLM call is now wrapped in llm_span(purpose="answer"),
+    # which produces span name "llm.answer" via the f"llm.{purpose}" rule.
+    assert 'purpose="answer"' in source
+    assert "llm_span" in source
 
 
 def test_ingestion_task_references_restore_helper() -> None:

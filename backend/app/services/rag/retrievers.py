@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from sqlalchemy import or_, select
 
 from app.core.config import get_settings
+from app.core.observability.agent_tracing import retriever_span
 from app.db.models.knowledge import KnowledgeChunk, KnowledgeDocument
 from app.db.session import bypass_rls_session
 from app.services.rag.query_rewriter import rewrite_query as rewrite_query
@@ -367,13 +368,31 @@ def retrieve_hybrid(
             )
         lexical_fn = retrieve_lexical
 
-    dense_hits = retrieve_dense(question, tenant_id, customer_id, top_k)
-    lexical_hits = lexical_fn(question, tenant_id, customer_id, top_k)
-    fused_hits = fuse_ranked_hits(
-        dense_hits,
-        lexical_hits,
+    # P8.1: parent retriever span. Wraps dense + lexical + fusion so the
+    # whole "hybrid retrieve" shows up as one OpenInference RETRIEVER
+    # node in Phoenix, with per-branch counts attached as attrs (rather
+    # than separate spans — these are cheap and noisy).
+    with retriever_span(
+        query=question,
         top_k=top_k,
-        rrf_k=max(0, rag_settings.rrf_k),
-        max_chunks_per_document=rag_settings.max_chunks_per_document,
-    )
-    return fused_hits[:top_k]
+        **{
+            "retrieval.backend": f"hybrid({backend})",
+            "tenant.id": tenant_id,
+            "customer.id": customer_id,
+        },
+    ) as span:
+        dense_hits = retrieve_dense(question, tenant_id, customer_id, top_k)
+        lexical_hits = lexical_fn(question, tenant_id, customer_id, top_k)
+        fused_hits = fuse_ranked_hits(
+            dense_hits,
+            lexical_hits,
+            top_k=top_k,
+            rrf_k=max(0, rag_settings.rrf_k),
+            max_chunks_per_document=rag_settings.max_chunks_per_document,
+        )
+        final_hits = fused_hits[:top_k]
+        span.set_attr("retrieval.documents.count", len(final_hits))
+        span.set_attr("retrieval.dense_hits", len(dense_hits))
+        span.set_attr("retrieval.lexical_hits", len(lexical_hits))
+        span.set_attr("retrieval.fused_hits", len(fused_hits))
+        return final_hits

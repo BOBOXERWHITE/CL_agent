@@ -663,46 +663,63 @@ def texts_to_embeddings(texts: list[str], dimension: int) -> list[list[float]]:
 
     The model name is part of the key so rotating ``EMBEDDING_MODEL_NAME``
     (e.g. text-embedding-3-small → bge-m3) does not serve stale vectors.
+
+    P8.1: wraps the whole operation in an OpenInference ``embedding``
+    span so Phoenix shows latency + batch size + cache hit ratio per call.
+    Cache-only paths still emit a span (with ``cache.miss=0``) so dashboard
+    "embedding QPS" charts don't undercount cached requests.
     """
     if not texts:
         return []
 
     from app.core.cache import embedding_cache_key, get_cache
+    from app.core.observability.agent_tracing import embedding_span
 
     profile = get_active_embedding_profile()
     cache = get_cache()
     settings = get_settings()
 
-    keys: list[str] = [embedding_cache_key(profile.model_name, t) for t in texts]
-    cached: list[list[float] | None] = []
-    miss_indices: list[int] = []
-    for idx, key in enumerate(keys):
-        try:
-            hit = cache.get(key)
-        except Exception:
-            hit = None
-        if (
-            isinstance(hit, list)
-            and len(hit) == dimension
-            and all(isinstance(v, int | float) for v in hit)
-        ):
-            cached.append([float(v) for v in hit])
-        else:
-            cached.append(None)
-            miss_indices.append(idx)
-
-    if miss_indices:
-        miss_texts = [texts[i] for i in miss_indices]
-        fresh = get_embedding_client().embed_texts(miss_texts, dimension)
-        for slot, vector in zip(miss_indices, fresh, strict=True):
-            cached[slot] = vector
+    with embedding_span(
+        model_name=profile.model_name,
+        provider=profile.provider,
+        text_count=len(texts),
+        dimension=dimension,
+    ) as span:
+        keys: list[str] = [embedding_cache_key(profile.model_name, t) for t in texts]
+        cached: list[list[float] | None] = []
+        miss_indices: list[int] = []
+        for idx, key in enumerate(keys):
             try:
-                cache.set(keys[slot], vector, ttl_seconds=settings.cache_embedding_ttl_seconds)
+                hit = cache.get(key)
             except Exception:
-                pass
+                hit = None
+            if (
+                isinstance(hit, list)
+                and len(hit) == dimension
+                and all(isinstance(v, int | float) for v in hit)
+            ):
+                cached.append([float(v) for v in hit])
+            else:
+                cached.append(None)
+                miss_indices.append(idx)
 
-    # Every slot is filled by this point (either cache hit or fresh result).
-    return [vector for vector in cached if vector is not None]
+        if miss_indices:
+            miss_texts = [texts[i] for i in miss_indices]
+            fresh = get_embedding_client().embed_texts(miss_texts, dimension)
+            for slot, vector in zip(miss_indices, fresh, strict=True):
+                cached[slot] = vector
+                try:
+                    cache.set(keys[slot], vector, ttl_seconds=settings.cache_embedding_ttl_seconds)
+                except Exception:
+                    pass
+
+        # Per-call cache observability so the embedding cost chart in
+        # Phoenix is meaningful (a 100 % cache-hit call = $0 + ~0 ms).
+        span.set_attr("embedding.cache.hits", len(texts) - len(miss_indices))
+        span.set_attr("embedding.cache.misses", len(miss_indices))
+
+        # Every slot is filled by this point (either cache hit or fresh result).
+        return [vector for vector in cached if vector is not None]
 
 
 def text_to_embedding(text: str, dimension: int) -> list[float]:
@@ -717,46 +734,58 @@ async def texts_to_embeddings_async(texts: list[str], dimension: int) -> list[li
     microseconds), misses are batched and embedded via the provider's
     async API. Only the network IO is awaited; the surrounding glue is
     unchanged so behaviour matches the sync helper byte-for-byte.
+
+    P8.1: matches the sync helper's ``embedding`` span behaviour.
     """
     if not texts:
         return []
 
     from app.core.cache import embedding_cache_key, get_cache
+    from app.core.observability.agent_tracing import embedding_span
 
     profile = get_active_embedding_profile()
     cache = get_cache()
     settings = get_settings()
 
-    keys: list[str] = [embedding_cache_key(profile.model_name, t) for t in texts]
-    cached: list[list[float] | None] = []
-    miss_indices: list[int] = []
-    for idx, key in enumerate(keys):
-        try:
-            hit = cache.get(key)
-        except Exception:
-            hit = None
-        if (
-            isinstance(hit, list)
-            and len(hit) == dimension
-            and all(isinstance(v, int | float) for v in hit)
-        ):
-            cached.append([float(v) for v in hit])
-        else:
-            cached.append(None)
-            miss_indices.append(idx)
-
-    if miss_indices:
-        miss_texts = [texts[i] for i in miss_indices]
-        client = get_embedding_client()
-        fresh = await client.embed_texts_async(miss_texts, dimension)
-        for slot, vector in zip(miss_indices, fresh, strict=True):
-            cached[slot] = vector
+    with embedding_span(
+        model_name=profile.model_name,
+        provider=profile.provider,
+        text_count=len(texts),
+        dimension=dimension,
+    ) as span:
+        keys: list[str] = [embedding_cache_key(profile.model_name, t) for t in texts]
+        cached: list[list[float] | None] = []
+        miss_indices: list[int] = []
+        for idx, key in enumerate(keys):
             try:
-                cache.set(keys[slot], vector, ttl_seconds=settings.cache_embedding_ttl_seconds)
+                hit = cache.get(key)
             except Exception:
-                pass
+                hit = None
+            if (
+                isinstance(hit, list)
+                and len(hit) == dimension
+                and all(isinstance(v, int | float) for v in hit)
+            ):
+                cached.append([float(v) for v in hit])
+            else:
+                cached.append(None)
+                miss_indices.append(idx)
 
-    return [vector for vector in cached if vector is not None]
+        if miss_indices:
+            miss_texts = [texts[i] for i in miss_indices]
+            client = get_embedding_client()
+            fresh = await client.embed_texts_async(miss_texts, dimension)
+            for slot, vector in zip(miss_indices, fresh, strict=True):
+                cached[slot] = vector
+                try:
+                    cache.set(keys[slot], vector, ttl_seconds=settings.cache_embedding_ttl_seconds)
+                except Exception:
+                    pass
+
+        span.set_attr("embedding.cache.hits", len(texts) - len(miss_indices))
+        span.set_attr("embedding.cache.misses", len(miss_indices))
+
+        return [vector for vector in cached if vector is not None]
 
 
 async def text_to_embedding_async(text: str, dimension: int) -> list[float]:

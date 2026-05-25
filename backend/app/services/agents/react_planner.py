@@ -37,7 +37,11 @@ from typing import Any, Literal
 import httpx
 
 from app.core.config import get_settings
-from app.core.observability.agent_tracing import llm_span
+from app.core.observability.agent_tracing import (
+    compute_llm_cost_usd,
+    llm_span,
+    set_llm_messages_attrs,
+)
 
 _log = logging.getLogger(__name__)
 
@@ -240,12 +244,20 @@ def plan_next_action(
     # P8: emit an LLM span so Phoenix / LangSmith / Jaeger can plot the
     # planner's per-cycle latency + token usage + cost separately from
     # the surrounding agent / react_step spans.
+    request_messages = [
+        {"role": "system", "content": _REACT_SYSTEM_PROMPT},
+        {"role": "user", "content": user_prompt},
+    ]
     with llm_span(
         purpose="react_plan",
         model_name=settings.llm_model_name,
         provider=settings.llm_provider,
         **{"llm.current_step": current_step},
     ) as span:
+        # P8.1: emit input_messages BEFORE the call so the trace is still
+        # useful even if the upstream errors out / times out (we won't
+        # have output_messages but at least Phoenix shows the prompt).
+        set_llm_messages_attrs(span, input_messages=request_messages)
         try:
             response = client.post(
                 f"{settings.llm_api_base_url.rstrip('/')}/chat/completions",
@@ -257,10 +269,7 @@ def plan_next_action(
                     "model": settings.llm_model_name,
                     "temperature": 0.0,
                     "response_format": {"type": "json_object"},
-                    "messages": [
-                        {"role": "system", "content": _REACT_SYSTEM_PROMPT},
-                        {"role": "user", "content": user_prompt},
-                    ],
+                    "messages": request_messages,
                 },
             )
             response.raise_for_status()
@@ -270,9 +279,29 @@ def plan_next_action(
             # can aggregate by purpose/agent/tenant without parsing logs.
             usage = payload.get("usage") or {}
             if usage:
-                span.set_attr("llm.token_count.prompt", int(usage.get("prompt_tokens", 0)))
-                span.set_attr("llm.token_count.completion", int(usage.get("completion_tokens", 0)))
-                span.set_attr("llm.token_count.total", int(usage.get("total_tokens", 0)))
+                _prompt_tokens = int(usage.get("prompt_tokens", 0))
+                _completion_tokens = int(usage.get("completion_tokens", 0))
+                span.set_attr("llm.token_count.prompt", _prompt_tokens)
+                span.set_attr("llm.token_count.completion", _completion_tokens)
+                span.set_attr(
+                    "llm.token_count.total",
+                    int(usage.get("total_tokens", _prompt_tokens + _completion_tokens)),
+                )
+                # P8.1: per-span USD cost via pinned price table.
+                span.set_attr(
+                    "llm.cost.usd",
+                    compute_llm_cost_usd(
+                        model_name=settings.llm_model_name,
+                        prompt_tokens=_prompt_tokens,
+                        completion_tokens=_completion_tokens,
+                    ),
+                )
+            # P8.1: emit the assistant reply as output_messages so Phoenix
+            # can render the full request/response pair in the Messages tab.
+            set_llm_messages_attrs(
+                span,
+                output_messages=[{"role": "assistant", "content": content}],
+            )
         except (
             httpx.HTTPError,
             KeyError,

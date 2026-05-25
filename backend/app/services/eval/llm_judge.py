@@ -27,7 +27,11 @@ from dataclasses import dataclass
 import httpx
 
 from app.core.config import get_settings
-from app.core.observability.agent_tracing import llm_span
+from app.core.observability.agent_tracing import (
+    compute_llm_cost_usd,
+    llm_span,
+    set_llm_messages_attrs,
+)
 
 _log = logging.getLogger(__name__)
 
@@ -240,11 +244,18 @@ def judge_answer(
     # P8: judge LLM calls get their own span so eval cost is separable
     # from inference cost in dashboards. ``purpose="eval_judge"`` keeps
     # them out of the "answer" cost aggregate.
+    request_messages = [
+        {"role": "system", "content": _JUDGE_SYSTEM_PROMPT},
+        {"role": "user", "content": user_prompt},
+    ]
     with llm_span(
         purpose="eval_judge",
         model_name=model_name,
         provider=settings.llm_provider,
     ) as span:
+        # P8.1: emit input_messages BEFORE the call so the trace shows
+        # the prompt even when the upstream errors out.
+        set_llm_messages_attrs(span, input_messages=request_messages)
         try:
             response = client.post(
                 f"{settings.llm_api_base_url.rstrip('/')}/chat/completions",
@@ -255,10 +266,7 @@ def judge_answer(
                 json={
                     "model": model_name,
                     "temperature": 0.0,
-                    "messages": [
-                        {"role": "system", "content": _JUDGE_SYSTEM_PROMPT},
-                        {"role": "user", "content": user_prompt},
-                    ],
+                    "messages": request_messages,
                 },
             )
             response.raise_for_status()
@@ -266,12 +274,31 @@ def judge_answer(
             content = str(payload["choices"][0]["message"]["content"])
             usage = payload.get("usage") or {}
             if usage:
-                span.set_attr("llm.token_count.prompt", int(usage.get("prompt_tokens", 0)))
+                _prompt_tokens = int(usage.get("prompt_tokens", 0))
+                _completion_tokens = int(usage.get("completion_tokens", 0))
+                span.set_attr("llm.token_count.prompt", _prompt_tokens)
+                span.set_attr("llm.token_count.completion", _completion_tokens)
                 span.set_attr(
-                    "llm.token_count.completion",
-                    int(usage.get("completion_tokens", 0)),
+                    "llm.token_count.total",
+                    int(usage.get("total_tokens", _prompt_tokens + _completion_tokens)),
                 )
-                span.set_attr("llm.token_count.total", int(usage.get("total_tokens", 0)))
+                # P8.1: per-span USD cost via pinned price table so eval
+                # runs surface their judge spend in Phoenix without a
+                # separate billing query.
+                span.set_attr(
+                    "llm.cost.usd",
+                    compute_llm_cost_usd(
+                        model_name=model_name,
+                        prompt_tokens=_prompt_tokens,
+                        completion_tokens=_completion_tokens,
+                    ),
+                )
+            # P8.1: emit the assistant reply as output_messages so Phoenix
+            # can render the full request/response pair in the Messages tab.
+            set_llm_messages_attrs(
+                span,
+                output_messages=[{"role": "assistant", "content": content}],
+            )
         except (
             httpx.HTTPError,
             KeyError,

@@ -38,10 +38,13 @@ from app.core.observability.agent_tracing import (
     OPENINFERENCE_SPAN_KIND,
     SpanKind,
     agent_span,
+    compute_llm_cost_usd,
+    embedding_span,
     llm_span,
     react_step_span,
     retriever_span,
     safe_attr_value,
+    set_llm_messages_attrs,
     tool_span,
 )
 
@@ -137,7 +140,7 @@ def test_llm_span_sets_model_provider_and_kind(
 ) -> None:
     with llm_span(
         purpose="react_plan",
-        model_name="deepseek-v3-2-251201",
+        model_name="qwen3.6-flash",
         provider="openai-compatible",
     ) as span:
         span.set_attr("llm.token_count.prompt", 1240)
@@ -148,7 +151,7 @@ def test_llm_span_sets_model_provider_and_kind(
     attrs = dict(s.attributes or {})
     assert s.name == "llm.react_plan"
     assert attrs.get(OPENINFERENCE_SPAN_KIND) == SpanKind.LLM
-    assert attrs.get("llm.model_name") == "deepseek-v3-2-251201"
+    assert attrs.get("llm.model_name") == "qwen3.6-flash"
     assert attrs.get("llm.provider") == "openai-compatible"
     assert attrs.get("llm.token_count.prompt") == 1240
     assert attrs.get("llm.token_count.completion") == 88
@@ -308,3 +311,158 @@ def test_helpers_dont_crash_when_tracer_not_ready(monkeypatch) -> None:
             pass
         with react_step_span(step=0, plan_action="finalize"):
             pass
+        with embedding_span(model_name="m", text_count=2, dimension=1536):
+            pass
+
+
+# ---------------------------------------------------------------------------
+# P8.1: embedding_span — span kind + attrs
+# ---------------------------------------------------------------------------
+
+
+def test_embedding_span_sets_openinference_kind_and_attrs(
+    exporter: InMemorySpanExporter,
+) -> None:
+    with embedding_span(
+        model_name="text-embedding-v4",
+        provider="dashscope",
+        text_count=8,
+        dimension=1536,
+    ):
+        pass
+    spans = exporter.get_finished_spans()
+    assert len(spans) == 1
+    span = spans[0]
+    assert span.name == "embedding"
+    assert span.attributes[OPENINFERENCE_SPAN_KIND] == SpanKind.EMBEDDING
+    assert span.attributes["embedding.model_name"] == "text-embedding-v4"
+    assert span.attributes["embedding.provider"] == "dashscope"
+    assert span.attributes["embedding.text_count"] == 8
+    assert span.attributes["embedding.dimension"] == 1536
+
+
+def test_embedding_span_omits_optional_attrs_when_none(
+    exporter: InMemorySpanExporter,
+) -> None:
+    """``text_count`` / ``dimension`` are optional — passing None should
+    leave them off the span entirely rather than setting them to None
+    (some OTEL backends reject None attribute values)."""
+    with embedding_span(model_name="text-embedding-v4"):
+        pass
+    span = exporter.get_finished_spans()[0]
+    assert "embedding.text_count" not in span.attributes
+    assert "embedding.dimension" not in span.attributes
+
+
+# ---------------------------------------------------------------------------
+# P8.1: compute_llm_cost_usd — pinned price table
+# ---------------------------------------------------------------------------
+
+
+def test_compute_llm_cost_usd_known_model() -> None:
+    """qwen-flash @ DashScope ¥0.0008/1K input + ¥0.0032/1K output ≈
+    $0.000114 / $0.000457. 1000 input + 500 output tokens should land
+    around $0.000343 (= 0.000114 + 0.000457 * 0.5)."""
+    cost = compute_llm_cost_usd(
+        model_name="qwen-flash",
+        prompt_tokens=1000,
+        completion_tokens=500,
+    )
+    assert cost == pytest.approx(0.0003425, abs=1e-6)
+
+
+def test_compute_llm_cost_usd_unknown_model_returns_zero() -> None:
+    """Better to show a $0 badge than invent a number for an unknown model."""
+    assert (
+        compute_llm_cost_usd(
+            model_name="some-random-future-model",
+            prompt_tokens=1000,
+            completion_tokens=500,
+        )
+        == 0.0
+    )
+
+
+def test_compute_llm_cost_usd_clamps_negative_tokens() -> None:
+    """Malformed upstream usage block (negative / None / garbage) must
+    not produce phantom costs."""
+    assert (
+        compute_llm_cost_usd(
+            model_name="qwen-flash",
+            prompt_tokens=-100,
+            completion_tokens=-50,
+        )
+        == 0.0
+    )
+
+
+# ---------------------------------------------------------------------------
+# P8.1: set_llm_messages_attrs — OpenInference indexed message attrs
+# ---------------------------------------------------------------------------
+
+
+def test_set_llm_messages_attrs_emits_indexed_input_and_output(
+    exporter: InMemorySpanExporter,
+) -> None:
+    with llm_span(purpose="answer", model_name="qwen-flash") as span:
+        set_llm_messages_attrs(
+            span,
+            input_messages=[
+                {"role": "system", "content": "You are helpful."},
+                {"role": "user", "content": "Hello."},
+            ],
+            output_messages=[{"role": "assistant", "content": "Hi."}],
+        )
+    attrs = exporter.get_finished_spans()[0].attributes
+    assert attrs["llm.input_messages.0.message.role"] == "system"
+    assert attrs["llm.input_messages.0.message.content"] == "You are helpful."
+    assert attrs["llm.input_messages.1.message.role"] == "user"
+    assert attrs["llm.input_messages.1.message.content"] == "Hello."
+    assert attrs["llm.output_messages.0.message.role"] == "assistant"
+    assert attrs["llm.output_messages.0.message.content"] == "Hi."
+
+
+def test_set_llm_messages_attrs_truncates_long_content(
+    exporter: InMemorySpanExporter,
+) -> None:
+    """Phoenix collector has a ~64KB-per-attr soft cap; truncating client-side
+    avoids 'value too long' warnings on the receiver."""
+    huge = "x" * 10_000
+    with llm_span(purpose="answer", model_name="qwen-flash") as span:
+        set_llm_messages_attrs(
+            span,
+            input_messages=[{"role": "user", "content": huge}],
+            max_chars_per_message=100,
+        )
+    content = exporter.get_finished_spans()[0].attributes["llm.input_messages.0.message.content"]
+    assert isinstance(content, str)
+    assert content.endswith("...[truncated]")
+    assert len(content) <= 100 + len("...[truncated]")
+
+
+def test_set_llm_messages_attrs_defaults_missing_fields(
+    exporter: InMemorySpanExporter,
+) -> None:
+    """Missing role → 'user'; missing content → ''. Important so an upstream
+    that returns a partial dict doesn't crash the tracing path."""
+    with llm_span(purpose="answer", model_name="qwen-flash") as span:
+        set_llm_messages_attrs(span, input_messages=[{}])
+    attrs = exporter.get_finished_spans()[0].attributes
+    assert attrs["llm.input_messages.0.message.role"] == "user"
+    assert attrs["llm.input_messages.0.message.content"] == ""
+
+
+def test_set_llm_messages_attrs_skips_none_sides(
+    exporter: InMemorySpanExporter,
+) -> None:
+    """Passing only input_messages (e.g. before the LLM call returns) must
+    not emit any output_messages.* attrs."""
+    with llm_span(purpose="answer", model_name="qwen-flash") as span:
+        set_llm_messages_attrs(
+            span,
+            input_messages=[{"role": "user", "content": "Q"}],
+        )
+    attrs = exporter.get_finished_spans()[0].attributes
+    assert "llm.input_messages.0.message.content" in attrs
+    # No output_messages.* keys should be present
+    assert not any(str(k).startswith("llm.output_messages.") for k in attrs)
